@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 # ── Constants mirroring the C++ engine ────────────────────────────────────────
 TIMELINE_MAX     = 0xFFFF
-MAX_NOTES        = 512     # MAX_NOTES_PER_CHART from NoteChart.h
+MAX_NOTES        = 512  # MAX_NOTES_PER_CHART from NoteChart.h
 LANE_MAP: dict[str, int] = {'L': 0, 'R': 1, 'U': 2, 'D': 3}
 FLAG_MAP: dict[str, int] = {
     'mine':   0x01,
@@ -129,11 +129,11 @@ CPP_HEADER_TEMPLATE = """\
 namespace Engine::Charts {{
 
 static const Note kSong{song_id_padded}_Notes[] = {{
-//    {{ timeline, lane, flags, holdLength }}
+//    {{ timeline, holdLength, lane, flags }}
 """
 
-# Fixed field alignment order mapping 1:1 onto your 4-byte packed memory boundaries
-CPP_NOTE_ROW = "    {{ 0x{timeline:04X}, {lane}, 0x{flags:02X}, 0x{hold:04X} }},  // {comment}\n"
+# FIXED: Field initialization ordering matches struct Note memory packing layout exactly
+CPP_NOTE_ROW = "    {{ 0x{timeline:04X}, 0x{hold:04X}, {lane}, 0x{flags:02X} }},  // {comment}\n"
 
 CPP_FOOTER_TEMPLATE = """\
 }};
@@ -157,9 +157,9 @@ static_assert(
 
 // High-portability structural sequence initialization matching NoteChart.h
 const NoteChart kSong{song_id_padded}_Chart = {{
-    {song_id},               // songId
+    {song_id},                       // songId
     kSong{song_id_padded}_NoteCount,      // noteCount
-    {bpm},             // tempoBPM
+    {bpm},                     // tempoBPM
     kSong{song_id_padded}_Notes // notes array pointer reference
 }};
 
@@ -228,24 +228,4 @@ def convert(input_json: str, song_id: int, output_cpp: str) -> None:
             sys.exit(1)
 
     if len(all_rows) > MAX_NOTES:
-        print(f"  ERROR: {len(all_rows)} notes exceeds ceiling limit.", file=sys.stderr)
-        sys.exit(1)
-
-    # Sort array strictly by (timeline, lane) via NoteRow dataclass defaults
-    all_rows.sort()
-
-    # Python-side sequence validation audit before file emission
-    for idx in range(1, len(all_rows)):
-        if all_rows[idx].timeline < all_rows[idx - 1].timeline:
-            print(f"  INTERNAL ERROR: Sorting constraint violation at note {idx} ({all_rows[idx].source_time})", file=sys.stderr)
-            sys.exit(1)
-
-    print(f"chart_converter: {len(all_rows)} notes → '{output_cpp}'")
-    emit_cpp(all_rows, song_id, bpm, bars, encoder, input_json, output_cpp)
-    print("chart_converter: compilation process completed successfully.")
-
-if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print("Usage: chart_converter.py <input.json> <song_id> <output.cpp>", file=sys.stderr)
-        sys.exit(1)
-    convert(sys.argv[1], int(sys.argv[2]), sys.argv[3])
+        print(f"  ERROR: {len(all_rows)} notes exceeds ceiling limit.", file=
