@@ -133,7 +133,8 @@ static const Note kSong{song_id_padded}_Notes[] = {{
 """
 
 # FIXED: Field initialization ordering matches struct Note memory packing layout exactly
-CPP_NOTE_ROW = "    {{ 0x{timeline:04X}, 0x{hold:04X}, {lane}, 0x{flags:02X} }},  // {comment}\n"
+# FIXED: Matches the 4-byte structure initialization precisely
+CPP_NOTE_ROW = "    {{ 0x{timeline:04X}, {lane}, 0x{flags:02X} }},  // {comment}\n"
 
 CPP_FOOTER_TEMPLATE = """\
 }};
