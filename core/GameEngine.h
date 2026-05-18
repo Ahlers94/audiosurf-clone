@@ -65,6 +65,7 @@ public:
         globalTrackPos  = 0;
         running         = true;
         generatorSeed   = 0xCAFEBABEu;
+        lastInputState  = 0;
 
         // Pre-generate the initial look-ahead slices so geometry exists instantly
         for (uint8_t i = 0; i < LOOK_AHEAD_SEGMENTS; ++i) {
@@ -95,14 +96,18 @@ public:
             return;
         }
 
-        // 2. INPUT PROCESSING
+        // 2. INPUT PROCESSING (With Edge-Triggered Action Filtering)
         platform.input->poll();
-        PAL::InputState actions = platform.input->readActions();
+        PAL::InputState currentInput = platform.input->readActions();
+        
+        // Extract falling edges so taps only execute once per press event
+        PAL::InputState actionsPressed = currentInput & ~lastInputState;
+        lastInputState = currentInput;
 
         if (state == GameState::Playing) {
-            handlePlayingInput(actions);
+            handlePlayingInput(actionsPressed);
         } else if (state == GameState::Paused) {
-            handlePausedInput(actions);
+            handlePausedInput(actionsPressed);
             return; // Freeze game logic and physics while paused
         }
 
@@ -125,9 +130,11 @@ public:
             }
         }
 
-        // Clean up and retire old track segments that fall behind the camera viewport
-        uint8_t retireIdx = static_cast<uint8_t>(curIdx - 2); 
-        trackManager.segments[retireIdx].reset(); 
+        // Protect start of track from underflow loops
+        if (globalTrackPos >= (2 << 8)) {
+            uint8_t retireIdx = static_cast<uint8_t>(curIdx - 2); 
+            trackManager.segments[retireIdx].reset(); 
+        }
 
         // 5. BLOCK COLLISION DETECTION
         for (uint16_t i = 0; i < BLOCK_POOL_SIZE; ++i) {
@@ -176,13 +183,13 @@ public:
                 SFP16 xLeft  = static_cast<SFP16>(col       * LANE_WIDTH_FP_INT);
                 SFP16 xRight = static_cast<SFP16>((col + 1) * LANE_WIDTH_FP_INT);
 
-                // Linearly interpolate block heights across track segments
+                // Linearly interpolate block heights using precise Q8.8 scaling
                 uint8_t nextSegIdx = static_cast<uint8_t>(segIdx + 1);
                 uint8_t h0 = seg.heightMap[col];
                 uint8_t h1 = trackManager.segments[nextSegIdx].heightMap[col];
-                uint8_t h  = fp_lerp(static_cast<FP16>(h0 << 4),
-                                     static_cast<FP16>(h1 << 4),
-                                     subBlend) >> 4;
+                uint8_t h  = fp_lerp(static_cast<FP16>(h0 << 8),
+                                     static_cast<FP16>(h1 << 8),
+                                     subBlend) >> 8;
 
                 SFP16 yBottom = 0;
                 SFP16 yTop    = static_cast<SFP16>(h * FP_ONE);
@@ -234,35 +241,43 @@ public:
     }
 
 private:
-    void handlePlayingInput(PAL::InputState actions)
+    void handlePlayingInput(PAL::InputState actionsPressed)
     {
         using A = PAL::InputAction;
-        if (actions & static_cast<uint8_t>(A::LaneLeft)) {
+        if (actionsPressed & static_cast<uint8_t>(A::LaneLeft)) {
             if (player.targetLane > 0) {
                 player.targetLane--;
-                // Note: player.laneOffset resets inside the physics clock loop, not here
+                // Handle mid-slide redirects cleanly by preserving relative progress
+                if (player.lane != player.targetLane) {
+                    player.laneOffset = static_cast<FP16>(FP_ONE - player.laneOffset);
+                    player.lane = player.targetLane;
+                }
             }
         }
-        if (actions & static_cast<uint8_t>(A::LaneRight)) {
+        if (actionsPressed & static_cast<uint8_t>(A::LaneRight)) {
             if (player.targetLane < LANE_COUNT - 1) {
                 player.targetLane++;
-                // Note: player.laneOffset resets inside the physics clock loop, not here
+                // Handle mid-slide redirects cleanly by preserving relative progress
+                if (player.lane != player.targetLane) {
+                    player.laneOffset = static_cast<FP16>(FP_ONE - player.laneOffset);
+                    player.lane = player.targetLane;
+                }
             }
         }
-        if (actions & static_cast<uint8_t>(A::Pause)) {
+        if (actionsPressed & static_cast<uint8_t>(A::Pause)) {
             state = GameState::Paused;
             platform.audio->setPaused(true);
         }
     }
 
-    void handlePausedInput(PAL::InputState actions)
+    void handlePausedInput(PAL::InputState actionsPressed)
     {
         using A = PAL::InputAction;
-        if (actions & static_cast<uint8_t>(A::Pause)) {
+        if (actionsPressed & static_cast<uint8_t>(A::Pause)) {
             state = GameState::Playing;
             platform.audio->setPaused(false);
         }
-        if (actions & static_cast<uint8_t>(A::Back)) {
+        if (actionsPressed & static_cast<uint8_t>(A::Back)) {
             running = false;
         }
     }
@@ -315,10 +330,11 @@ private:
     ParticleManager particleManager;
     Player          player;
 
-    FP16      globalTrackPos = 0;
-    GameState state          = GameState::Idle;
-    bool      running        = false;
-    uint32_t  generatorSeed  = 0;
+    FP16            globalTrackPos = 0;
+    GameState       state          = GameState::Idle;
+    bool            running        = false;
+    uint32_t        generatorSeed  = 0;
+    PAL::InputState lastInputState = 0;  ///< Tracks input state history for edge validation
 };
 
 } // namespace Engine
