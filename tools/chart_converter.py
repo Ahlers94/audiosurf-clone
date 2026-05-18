@@ -2,7 +2,7 @@
 """
 chart_converter.py — JSON chart source → C++ NoteChart translation unit
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Hardened version: fixes template string truncation and enforces positional C++ init.
+Hardened version: fixes template paths, sorting asset safety, and alignment checks.
 """
 
 import json
@@ -124,7 +124,7 @@ CPP_HEADER_TEMPLATE = """\
 //   ticks_per_beat = 0x{ticks_per_beat:04X}
 //   ticks_per_16th = 0x{ticks_per_16th:04X}
 
-#include "../charts/SongIndex.h"
+#include "SongIndex.h"
 
 namespace Engine::Charts {{
 
@@ -134,11 +134,15 @@ static const Note kSong{song_id_padded}_Notes[] = {{
 
 CPP_NOTE_ROW = "    {{ 0x{timeline:04X}, 0x{hold:04X}, {lane}, 0x{flags:02X}, {{0,0}} }},  // {comment}\n"
 
-# Positional compilation template fixed with exact evaluation (<) operator
 CPP_FOOTER_TEMPLATE = """\
 }};
 
 constexpr uint16_t kSong{song_id_padded}_NoteCount = static_cast<uint16_t>(sizeof(kSong{song_id_padded}_Notes) / sizeof(Note));
+
+static_assert(
+    kSong{song_id_padded}_NoteCount > 0,
+    "Song{song_id_padded}: Note chart cannot be empty."
+);
 
 static_assert(
     kSong{song_id_padded}_NoteCount <= {max_notes},
@@ -146,8 +150,8 @@ static_assert(
 );
 
 static_assert(
-    kSong{song_id_padded}_Notes[0].timeline < kSong{song_id_padded}_Notes[kSong{song_id_padded}_NoteCount - 1].timeline,
-    "Song{song_id_padded}: note array must climb ascending by timeline ticks."
+    kSong{song_id_padded}_Notes[kSong{song_id_padded}_NoteCount - 1].timeline >= kSong{song_id_padded}_Notes[0].timeline,
+    "Song{song_id_padded}: Chart end boundary points backwards in time."
 );
 
 // High-portability positional structure initialization
@@ -193,6 +197,7 @@ def emit_cpp(rows: list[NoteRow], song_id: int, bpm: int, bars: int, encoder: Ti
                 lane     = row.lane,
                 flags    = row.flags,
                 comment  = comment,
+                
             ))
 
         f.write(CPP_FOOTER_TEMPLATE.format(
@@ -226,7 +231,15 @@ def convert(input_json: str, song_id: int, output_cpp: str) -> None:
         print(f"  ERROR: {len(all_rows)} notes exceeds ceiling limit.", file=sys.stderr)
         sys.exit(1)
 
+    # Sort array strictly by (timeline, lane) via NoteRow dataclass defaults
     all_rows.sort()
+
+    # Python-side sequence validation audit before file emission
+    for idx in range(1, len(all_rows)):
+        if all_rows[idx].timeline < all_rows[idx - 1].timeline:
+            print(f"  INTERNAL ERROR: Sorting constraint violation at note {idx} ({all_rows[idx].source_time})", file=sys.stderr)
+            sys.exit(1)
+
     print(f"chart_converter: {len(all_rows)} notes → '{output_cpp}'")
     emit_cpp(all_rows, song_id, bpm, bars, encoder, input_json, output_cpp)
     print("chart_converter: compilation process completed successfully.")
@@ -234,5 +247,5 @@ def convert(input_json: str, song_id: int, output_cpp: str) -> None:
 if __name__ == "__main__":
     if len(sys.argv) != 4:
         print("Usage: chart_converter.py <input.json> <song_id> <output.cpp>", file=sys.stderr)
-        sys.argv = ["chart_converter.py", "song00.json", "0", "charts/Song00.cpp"] # Local development failback track path
+        sys.exit(1)
     convert(sys.argv[1], int(sys.argv[2]), sys.argv[3])
