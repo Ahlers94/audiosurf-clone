@@ -111,7 +111,7 @@ def expand_note(entry: dict, encoder: TickEncoder) -> list[NoteRow]:
         ))
     return rows
 
-# ── Safe code generation templates ───────────────────────────────────────────
+# ── Safe code generation templates (Fixed to align with NoteChart.h fields) ───
 
 CPP_HEADER_TEMPLATE = """\
 // {filename}
@@ -120,19 +120,20 @@ CPP_HEADER_TEMPLATE = """\
 // Song ID: {song_id}  |  BPM hint: {bpm}  |  Bars: {bars}  |  Notes: {note_count}
 //
 // Timeline encoding: Q8.8 uint16_t across 0x0000–0xFFFF ({bars} bars)
-//   ticks_per_bar  = 0x{ticks_per_bar:04X}
-//   ticks_per_beat = 0x{ticks_per_beat:04X}
-//   ticks_per_16th = 0x{ticks_per_16th:04X}
+//    ticks_per_bar  = 0x{ticks_per_bar:04X}
+//    ticks_per_beat = 0x{ticks_per_beat:04X}
+//    ticks_per_16th = 0x{ticks_per_16th:04X}
 
-#include "SongIndex.h"
+#include "charts/SongIndex.h"
 
 namespace Engine::Charts {{
 
 static const Note kSong{song_id_padded}_Notes[] = {{
-//   {{ timeline,  holdLength, lane, flags, {{0,0}} }}
+//    {{ timeline, lane, flags, holdLength }}
 """
 
-CPP_NOTE_ROW = "    {{ 0x{timeline:04X}, 0x{hold:04X}, {lane}, 0x{flags:02X}, {{0,0}} }},  // {comment}\n"
+# Fixed field alignment order mapping 1:1 onto your 4-byte packed memory boundaries
+CPP_NOTE_ROW = "    {{ 0x{timeline:04X}, {lane}, 0x{flags:02X}, 0x{hold:04X} }},  // {comment}\n"
 
 CPP_FOOTER_TEMPLATE = """\
 }};
@@ -154,12 +155,12 @@ static_assert(
     "Song{song_id_padded}: Chart end boundary points backwards in time."
 );
 
-// High-portability positional structure initialization
+// High-portability structural sequence initialization matching NoteChart.h
 const NoteChart kSong{song_id_padded}_Chart = {{
-    kSong{song_id_padded}_Notes,
-    kSong{song_id_padded}_NoteCount,
-    {song_id},
-    {bpm}
+    {song_id},               // songId
+    kSong{song_id_padded}_NoteCount,      // noteCount
+    {bpm},             // tempoBPM
+    kSong{song_id_padded}_Notes // notes array pointer reference
 }};
 
 }} // namespace Engine::Charts
@@ -197,7 +198,6 @@ def emit_cpp(rows: list[NoteRow], song_id: int, bpm: int, bars: int, encoder: Ti
                 lane     = row.lane,
                 flags    = row.flags,
                 comment  = comment,
-                
             ))
 
         f.write(CPP_FOOTER_TEMPLATE.format(
