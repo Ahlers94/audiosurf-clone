@@ -1,178 +1,5 @@
-// =============================================================================
-// DC_Platform.cpp  —  Dreamcast PAL implementation stubs
-//
-// All three interface implementations live here.
-// Fully optimized for the SH-4 and PowerVR2 pipeline architectures.
-// =============================================================================
-
-#ifdef __DREAMCAST__
-
-#include <kos.h>
-#include <dc/pvr.h>
-#include <dc/sndstream.h>
-#include <dc/maple.h>
-#include <dc/maple/controller.h>
-
-#include "../../pal/PAL.h"
-
-namespace Engine {
-namespace PAL {
-
-// Pre-compiled global palette tracking entries matching the Q8.8 engine layout
-static constexpr uint32_t s_pvr_palette[PALETTE_SIZE] = {
-    0xFF0000FF, // Neon Blue
-    0xFFFF00FF, // Neon Purple
-    0xFF00FFFF, // Cyan
-    0xFFFF0000, // Crimson
-    0xFF00FF00, // Matrix Green
-    0xFFFFFF00, // Neon Yellow
-    0xFFFF5500, // Vibrant Amber
-    0xFFFFFFFF  // Pure White
-};
-
 // ---------------------------------------------------------------------------
-// DC_Graphics
-// ---------------------------------------------------------------------------
-class DC_GraphicsImpl final : public GraphicsInterface
-{
-public:
-    DC_GraphicsImpl() = default;
-    ~DC_GraphicsImpl() override = default;
-
-    bool init(uint16_t w, uint16_t h) override
-    {
-        screenW = w; 
-        screenH = h;
-
-        // Configure optimal PowerVR tile matrix allocation pipelines
-        pvr_init_defaults();
-        pvr_set_bg_color(0.0f, 0.0f, 0.01f); 
-
-        // Pre-compile Opaque Context Structures
-        pvr_poly_cxt_t cxtOpaque;
-        pvr_poly_cxt_col(&cxtOpaque, PVR_LIST_OP_POLY);
-        cxtOpaque.gen.shading = PVR_SHADE_GOURAUD;
-        pvr_poly_compile(&hdrOpaque, &cxtOpaque);
-
-        // Pre-compile Translucent Context Structures (Additive Neon Blend Profiles)
-        pvr_poly_cxt_t cxtTranslucent;
-        pvr_poly_cxt_col(&cxtTranslucent, PVR_LIST_TR_POLY);
-        cxtTranslucent.gen.shading = PVR_SHADE_GOURAUD;
-        cxtTranslucent.blend.src   = PVR_BLEND_SRCALPHA;
-        cxtTranslucent.blend.dst   = PVR_BLEND_ONE; 
-        pvr_poly_compile(&hdrTranslucent, &cxtTranslucent);
-
-        return true;
-    }
-
-    void beginFrame() override 
-    { 
-        pvr_wait_ready(); 
-        pvr_scene_begin(); 
-
-        // BATCH SUBMISSION OPTIMIZATION: Emit state headers exactly once per rendering pass
-        pvr_list_prim(PVR_LIST_OP_POLY, &hdrOpaque, sizeof(pvr_poly_hdr_t));
-        pvr_list_prim(PVR_LIST_TR_POLY, &hdrTranslucent, sizeof(pvr_poly_hdr_t));
-    }
-    
-    void endFrame() override 
-    { 
-        pvr_scene_finish(); 
-    }
-    
-    void shutdown() override {}
-
-    void drawVoxelColumn(SFP16 xL, SFP16 xR, SFP16 yB, SFP16 yT, SFP16 z, uint8_t ci) override
-    {
-        // Zero-overhead SH-4 fixed-to-float transformations (1/256 = 0.00390625f)
-        float fl = static_cast<float>(xL) * 0.00390625f;
-        float fr = static_cast<float>(xR) * 0.00390625f;
-        float fb = static_cast<float>(yB) * 0.00390625f;
-        float ft = static_cast<float>(yT) * 0.00390625f;
-        float fz = static_cast<float>(z)  * 0.00390625f;
-
-        // Perform Native 2D Screen Projection Normalization Mapping
-        fl = (fl * 2.5f) + 80.0f;
-        fr = (fr * 2.5f) + 80.0f;
-        fb = static_cast<float>(screenH) - (fb * 3.0f);
-        ft = static_cast<float>(screenH) - (ft * 3.0f);
-
-        uint32_t col = s_pvr_palette[ci % PALETTE_SIZE];
-        submitQuadVertexStrip(fl, fr, fb, ft, 1.0f / (fz + 1.0f), col, false);
-    }
-
-    void drawVoxelColumnGlow(SFP16 xL, SFP16 xR, SFP16 yB, SFP16 yT, SFP16 z, uint8_t ci, uint8_t alpha) override
-    {
-        float fl = static_cast<float>(xL) * 0.00390625f;
-        float fr = static_cast<float>(xR) * 0.00390625f;
-        float fb = static_cast<float>(yB) * 0.00390625f;
-        float ft = static_cast<float>(yT) * 0.00390625f;
-        float fz = static_cast<float>(z)  * 0.00390625f;
-
-        fl = (fl * 2.5f) + 80.0f;
-        fr = (fr * 2.5f) + 80.0f;
-        fb = static_cast<float>(screenH) - (fb * 3.0f);
-        ft = static_cast<float>(screenH) - (ft * 3.0f);
-
-        uint32_t col = (s_pvr_palette[ci % PALETTE_SIZE] & 0x00FFFFFF)
-                       | (static_cast<uint32_t>(alpha) << 24);
-        submitQuadVertexStrip(fl, fr, fb, ft, 1.0f / (fz + 1.02f), col, true);
-    }
-
-    void drawBlock(SFP16 x, SFP16 y, SFP16 z, uint8_t ci) override
-    {
-        float fx = (static_cast<float>(x) * 0.00390625f * 2.5f) + 80.0f;
-        float fy = static_cast<float>(screenH) - (static_cast<float>(y) * 0.00390625f * 3.0f);
-        float fz = static_cast<float>(z) * 0.00390625f;
-
-        submitQuadVertexStrip(fx - 16.0f, fx + 16.0f, fy - 16.0f, fy + 16.0f, 
-                              1.0f / (fz + 0.9f), s_pvr_palette[ci % PALETTE_SIZE], false);
-    }
-
-    void drawParticle(SFP16 x, SFP16 y, SFP16 z, uint8_t ci, uint8_t a) override
-    {
-        float fx = (static_cast<float>(x) * 0.00390625f * 2.5f) + 80.0f;
-        float fy = static_cast<float>(screenH) - (static_cast<float>(y) * 0.00390625f * 3.0f);
-        float fz = static_cast<float>(z) * 0.00390625f;
-
-        uint32_t col = (s_pvr_palette[ci % PALETTE_SIZE] & 0x00FFFFFF)
-                       | (static_cast<uint32_t>(a) << 24);
-        submitQuadVertexStrip(fx - 4.0f, fx + 4.0f, fy - 4.0f, fy + 4.0f, 
-                              1.0f / (fz + 0.8f), col, true);
-    }
-
-    void drawHUD(uint32_t score, uint8_t combo, uint8_t x, uint8_t y) override
-    {
-        (void)score; (void)combo; (void)x; (void)y; // Handled via separate BIOS font call blocks
-    }
-
-    void updateCamera(FP16 trackPos, FP16 laneX) override
-    {
-        (void)trackPos; (void)laneX;
-    }
-
-private:
-    uint16_t screenW = 640, screenH = 480;
-    pvr_poly_hdr_t hdrOpaque;
-    pvr_poly_hdr_t hdrTranslucent;
-
-    inline void submitQuadVertexStrip(float l, float r, float b, float t, float invZ, uint32_t color, bool translucent)
-    {
-        pvr_list_t list = translucent ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY;
-
-        // Directly emit packed 32-byte primitive arrays down the pipeline hardware bus
-        pvr_vertex_t verts[4];
-        verts[0] = { PVR_CMD_VERTEX,     color, l, t, invZ, 0.0f, 0.0f };
-        verts[1] = { PVR_CMD_VERTEX,     color, r, t, invZ, 1.0f, 0.0f };
-        verts[2] = { PVR_CMD_VERTEX,     color, l, b, invZ, 0.0f, 1.0f };
-        verts[3] = { PVR_CMD_VERTEX_EOL, color, r, b, invZ, 1.0f, 1.0f }; 
-
-        pvr_list_prim(list, verts, sizeof(verts));
-    }
-};
-
-// ---------------------------------------------------------------------------
-// DC_Audio (AICA Stream)
+// DC_Audio (AICA Direct CDDA Stream Implementation)
 // ---------------------------------------------------------------------------
 class DC_AudioImpl final : public AudioInterface
 {
@@ -180,106 +7,120 @@ public:
     DC_AudioImpl() = default;
     ~DC_AudioImpl() override = default;
 
-    bool init() override     { snd_stream_init(); return true; }
-    void shutdown() override { snd_stream_shutdown(); }
+    bool init() override     
+    { 
+        // Spin up the core audio system hardware components
+        snd_stream_init(); 
+        m_isPlaying = false;
+        m_startSector = 0;
+        m_endSector = 0;
+        return true; 
+    }
+    
+    void shutdown() override 
+    { 
+        stop();
+        snd_stream_shutdown(); 
+    }
 
     bool play(uint8_t songId) override
     {
-        (void)songId;
-        songDuration = 180000; 
-        paused       = false;
-        fakeCursor   = 0;
+        // Convert zero-indexed song election directly to physical audio track index bounds.
+        // Assume data track resides on Track 1; Audio tracks begin on Track 2.
+        uint8_t targetTrack = songId + 2; 
+        
+        // Grab the physical Table of Contents structure from the GD-ROM disc sub-system
+        CDROM_TOC toc;
+        if (cdrom_read_toc(&toc, 0) != 0) {
+            dbglog(DBG_ERROR, "[DREAMSURF] CDDA Error: Failed to read disc Table of Contents.\n");
+            return false;
+        }
+
+        // Verify the requested track target is bounded correctly inside the TOC parameters
+        uint8_t firstTrack = CDROM_TOC_FIRST(toc);
+        uint8_t lastTrack  = CDROM_TOC_LAST(toc);
+        if (targetTrack < firstTrack || targetTrack > lastTrack) {
+            dbglog(DBG_ERROR, "[DREAMSURF] CDDA Target Track %d out of bounds (%d - %d).\n", 
+                   targetTrack, firstTrack, lastTrack);
+            return false;
+        }
+
+        // Extrapolate raw physical starting and ending LBA sector markers 
+        m_startSector = CDROM_TOC_LBA(toc.entry[targetTrack - 1]);
+        m_endSector   = CDROM_TOC_LBA(toc.entry[targetTrack]); // Beginning of next track boundary
+
+        // Execute raw low-level CDDA play macro: non-blocking loop commands passed to secondary sub-CPU
+        if (cdrom_cdda_play(targetTrack, targetTrack, 0, CDDA_TRACKS) != 0) {
+            dbglog(DBG_ERROR, "[DREAMSURF] CDDA Drive Hardware Allocation Refused.\n");
+            return false;
+        }
+
+        m_isPlaying = true;
         return true;
     }
 
-    void setPaused(bool p) override { paused = p; }
-    void stop() override            {}
+    void setPaused(bool p) override 
+    { 
+        if (p && m_isPlaying) {
+            cdrom_cdda_pause();
+        } else if (!p && m_isPlaying) {
+            cdrom_cdda_resume();
+        }
+    }
+    
+    void stop() override            
+    { 
+        if (m_isPlaying) {
+            cdrom_spin_down(); // Safely parks the drive laser array
+            m_isPlaying = false;
+        }
+    }
 
     FP16 getTrackProgress() override
     {
-        if (paused) return lastProgress;
+        if (!m_isPlaying) return 0;
+
+        // Query the optical hardware drive status via non-blocking sub-system calls
+        int driveStatus = 0;
+        int currentTrackLBA = 0;
         
-        // Advance clock monotonically to secure track retirement safety parameters
-        fakeCursor += 16; 
-        if (fakeCursor >= songDuration) {
-            return 0xFFFF; // Explicitly halt timeline execution bounds at saturation max
+        // Read low-level laser subcode tracking positions straight from the GD-ROM controller
+        if (cdrom_get_status(&driveStatus, &currentTrackLBA) != 0) {
+            return m_lastProgress; // Fallback smoothly to cached metrics on bus failure timeouts
         }
 
-        uint32_t prog = (fakeCursor * 65535) / songDuration;
-        lastProgress  = static_cast<FP16>(prog & 0xFFFF);
-        return lastProgress;
+        // Detect if the disc mechanism has naturally wrapped past track constraints or stopped
+        if (driveStatus != CD_STATUS_PLAYING && driveStatus != CD_STATUS_PAUSED) {
+            m_isPlaying = false;
+            return 0xFFFF; // Signal timeline retirement threshold immediately
+        }
+
+        // Safety clamp: Ensure the returned address is bounded correctly within our active frame space
+        if (currentTrackLBA < m_startSector) return 0;
+        if (currentTrackLBA >= m_endSector)  return 0xFFFF;
+
+        // Compute normalized timeline position relative to physical sector lengths
+        uint32_t totalTrackSectors = m_endSector - m_startSector;
+        uint32_t sectorsElapsed    = currentTrackLBA - m_startSector;
+
+        if (totalTrackSectors == 0) return 0;
+
+        // Map sector counts flawlessly onto the 0x0000 -> 0xFFFF Fixed-Point range scale
+        uint32_t prog = (sectorsElapsed * 65535u) / totalTrackSectors;
+        m_lastProgress = static_cast<FP16>(prog & 0xFFFFu);
+
+        return m_lastProgress;
     }
 
-    uint8_t getEnergyLevel() override { return 128; }
-
-private:
-    bool     paused       = false;
-    uint32_t songDuration = 0xFFFF;
-    uint32_t fakeCursor   = 0;
-    FP16     lastProgress = 0;
-};
-
-// ---------------------------------------------------------------------------
-// DC_Input (Maple Bus)
-// ---------------------------------------------------------------------------
-class DC_InputImpl final : public InputInterface
-{
-public:
-    DC_InputImpl() = default;
-    ~DC_InputImpl() override = default;
-
-    bool init() override     { return true; }
-    void shutdown() override {}
-
-    void poll() override
-    {
-        maple_device_t* dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-        if (!dev) return; 
-
-        cont_state_t* cs = reinterpret_cast<cont_state_t*>(maple_dev_status(dev));
-        if (!cs) return;
-
-        prevState = currState;
-        uint8_t targetState = 0;
-
-        if (cs->buttons & CONT_DPAD_LEFT)  targetState |= static_cast<uint8_t>(InputAction::LaneLeft);
-        if (cs->buttons & CONT_DPAD_RIGHT) targetState |= static_cast<uint8_t>(InputAction::LaneRight);
-        if (cs->buttons & CONT_START)      targetState |= static_cast<uint8_t>(InputAction::Pause);
-        if (cs->buttons & CONT_A)          targetState |= static_cast<uint8_t>(InputAction::Confirm);
-        if (cs->buttons & CONT_B)          targetState |= static_cast<uint8_t>(InputAction::Back);
-
-        currState = targetState;
+    uint8_t getEnergyLevel() override 
+    { 
+        // Returns median default if unattached to custom hardware fast-Fourier analysis drivers
+        return 128; 
     }
 
-    // Fulfill updated structural contracts enforced by the abstract PAL definition
-    InputState readPressedActions() override { return currState & ~prevState; }
-    InputState readHeldActions() override    { return currState; }
-    bool       isHeld(InputAction a) override { return (currState & static_cast<uint8_t>(a)) != 0; }
-
 private:
-    InputState currState = 0;
-    InputState prevState = 0;
+    bool     m_isPlaying   = false;
+    uint32_t m_startSector = 0;
+    uint32_t m_endSector   = 0;
+    FP16     m_lastProgress = 0;
 };
-
-// ---------------------------------------------------------------------------
-// Unified Platform Storage Instantiations
-// ---------------------------------------------------------------------------
-static DC_GraphicsImpl s_graphics;
-static DC_AudioImpl    s_audio;
-static DC_InputImpl    s_input;
-
-PlatformBundle createPlatform()
-{
-    PlatformBundle b;
-    b.graphics = &s_graphics;
-    b.audio    = &s_audio;
-    b.input    = &s_input;
-    return b;
-}
-
-void destroyPlatform(PlatformBundle&) {}
-
-} // namespace PAL
-} // namespace Engine
-
-#endif // __DREAMCAST__
