@@ -330,25 +330,50 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
 }
 
 void GameEngine::updateGameplaySimulation(PAL::InputState pressed) {
-    // --- DRIFT-RESISTANT COUNTER SYNCHRONIZATION HARDENING LAYER ---
-    m_syncTickCounter++;
+    // --- DRIFT-RESISTANT MONOTONIC CLOCK SYNCHRONIZATION LAYER ---
     
-    // Sub-query system: Only query hardware clock bounds once every 4 frames
+#ifdef __DREAMCAST__
+    // Raw SH-4 Bare-Metal Mode: Sub-query hardware registers to prevent long-term tracking drift
+    m_syncTickCounter++;
     if ((m_syncTickCounter & 0x03) == 0) {
         uint16_t hardwarePos = s_audio->getTrackProgress();
         m_localTrackAccumulator = static_cast<PAL::FP16>(hardwarePos);
     } else {
-        // Linearly step internal clock estimation using 60Hz frame pacing ticks (approx 0x0440 out of 0xFFFF scale bounds)
+        // Linearly step internal clock estimation using 60Hz frame pacing ticks (0x0440 out of 0xFFFF)
         uint32_t predictedTrack = static_cast<uint32_t>(m_localTrackAccumulator) + 0x0440u;
         m_localTrackAccumulator = (predictedTrack > 0xFFFFu) ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(predictedTrack);
     }
+#else
+    // WebAssembly Target Mode: Browser audio threads update asynchronously. 
+    // We enforce a strictly monotonic, fluid frame-pacing step to eliminate WebGL note jitter.
+    double audioCurrentTime = EM_ASM_DOUBLE({ return window._audioEl ? window._audioEl.currentTime : 0; });
+    double audioDuration    = EM_ASM_DOUBLE({ return window._trackDur || 1; });
 
+    if (audioCurrentTime > 0.0 && !s_audio->isPaused()) {
+        // Strict linear progress stepping matching requestAnimationFrame timing cadence
+        uint32_t predictedTrack = static_cast<uint32_t>(m_localTrackAccumulator) + 0x0440u;
+        
+        // Safety Guard: Check if our linear prediction has drifted radically far from the loose audio context
+        uint32_t trueHardwareTrack = static_cast<uint32_t>((audioCurrentTime / audioDuration) * 65535.0);
+        int32_t clockDrift = static_cast<int32_t>(predictedTrack) - static_cast<int32_t>(trueHardwareTrack);
+        
+        // If drift exceeds half a beat (~150ms / 0x0A00 units), softly nudge the track pointer instead of snapping
+        if (clockDrift > 0x0A00 || clockDrift < -0x0A00) {
+            predictedTrack = (predictedTrack + trueHardwareTrack) >> 1; 
+        }
+        
+        m_localTrackAccumulator = (predictedTrack > 0xFFFFu) ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(predictedTrack);
+    }
+#endif
+
+    // Check end-of-track bounds safely across execution paradigms
     if (m_localTrackAccumulator >= 0xFFFF) {
         s_audio->stop();
         m_currentState = EngineState::ResultsScreen;
         return;
     }
 
+    // --- EXECUTE TICK SIMULATION STEP ---
     const FrameResult fr = evaluateChart(m_localTrackAccumulator, pressed);
 
     const uint8_t totalHits  = fr.perfectCount + fr.goodCount;
