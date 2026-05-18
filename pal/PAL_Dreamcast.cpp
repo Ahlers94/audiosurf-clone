@@ -1,367 +1,570 @@
 // =============================================================================
-// PAL_Dreamcast.cpp (Continued)
+// GameEngine.cpp
+// Core Game Logic Pipeline — Fully Isolated Object-Oriented Architecture
 // =============================================================================
 
-// Global LUT: block type/colorIndex → 32-bit packed PVR colors (ARGB)
-static const uint32_t kColorLUT[8] = {
-    0xFF00FF00, // 0: Green
-    0xFFFF0000, // 1: Red
-    0xFF0000FF, // 2: Blue
-    0xFFFFFF00, // 3: Yellow (Obstacle)
-    0xFFFF00FF, // 4: Magenta
-    0xFF00FFFF, // 5: Cyan
-    0xFFFFFFFF, // 6: White
-    0xFF808080  // 7: Grey
+#include "GameEngine.h"
+#include "charts/SongIndex.h"
+
+namespace Engine {
+
+// Zero-allocation lookup array to instantly resolve fading opacity variables
+static const uint8_t kAlphaLUT[17] = {
+    0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 255
 };
 
-// Simple 3x5 Pixel Font Data for HUD (Numbers 0-9, 'C', 'M', 'P', 'S')
-// Each glyph fits in a 15-bit integer (5 rows x 3 bits)
-static const uint16_t kFontLUT[14] = {
-    0x7B6F, // 0
-    0x2C9E, // 1
-    0x73E7, // 2
-    0x73CF, // 3
-    0x5BE9, // 4
-    0x79CF, // 5
-    0x79EF, // 6
-    0x7249, // 7
-    0x7BEF, // 8
-    0x7BCF, // 9
-    0x7127, // C (Combo)
-    0x5D6D, // M (Miss)
-    0x7B24, // P (Perfect)
-    0x794F  // S (Score)
-};
+// Global static abstraction interfaces bound at runtime
+GraphicsInterface* GameEngine::s_graphics = nullptr;
+AudioInterface*    GameEngine::s_audio    = nullptr;
+InputInterface*    GameEngine::s_input    = nullptr;
 
-// Inline helper for converting SFP16 fixed-point (1/256) to standard floating-point
-static inline float sfp16_to_float(SFP16 val) {
-    return static_cast<float>(val) / 256.0f;
-}
+// =============================================================================
+// PLATFORM CONFIGURATION INITIALIZATION & STATE REBOOT LAYERS
+// =============================================================================
 
-// ---------------------------------------------------------------------------
-// Graphics Implementation
-// ---------------------------------------------------------------------------
+bool GameEngine::init(const PAL::PlatformBundle& bundle, uint8_t initialSongId) {
+    s_graphics = bundle.graphics;
+    s_audio    = bundle.audio;
+    s_input    = bundle.input;
 
-bool Graphics::init(int width, int height) {
-    // Initialize PVR subsystem with default video configuration
-    pvr_init_params_t pvr_params = {
-        { PVR_BIN_CXT_OP, PVR_BIN_CXT_NONE, PVR_BIN_CXT_TR, PVR_BIN_CXT_NONE, PVR_BIN_CXT_PT },
-        16 * 1024 * 1024
-    };
+    if (!s_graphics || !s_audio || !s_input) return false;
+    if (!s_graphics->init(640, 480))         return false;
+    if (!s_audio->init())                    return false;
+    if (!s_input->init())                    return false;
+
+    m_currentState = EngineState::TitleScreen;
+    m_selectedSong = initialSongId;
+
+    for (uint8_t i = 0; i < MAX_PARTICLES; ++i) {
+        m_particles[i].lifetime = 0;
+    }
+
+    resetPuzzleGrid();
+
+    m_lastHardwareTrackPos = 0;
+    m_localTrackAccumulator = 0;
+    m_syncTickCounter = 0;
+    m_isRunning = true;
     
-    if (pvr_init(&pvr_params) != 0) return false;
-
-    // Compile Opaque Header (Flat shaded, CCW culling, no textures)
-    pvr_poly_cxt_t opaque_cxt;
-    pvr_poly_cxt_col(&opaque_cxt, PVR_LIST_OP_POLY);
-    opaque_cxt.gen.shading = PVR_SHADE_FLAT;
-    opaque_cxt.gen.culling = PVR_CULL_CCW;
-    pvr_poly_compile(&s_opaque_hdr, &opaque_cxt);
-
-    // Compile Translucent Header (Flat shaded, CCW culling, alpha blending)
-    pvr_poly_cxt_t trans_cxt;
-    pvr_poly_cxt_col(&trans_cxt, PVR_LIST_TR_POLY);
-    trans_cxt.gen.shading = PVR_SHADE_FLAT;
-    trans_cxt.gen.culling = PVR_CULL_CCW;
-    trans_cxt.blend.src = PVR_BLEND_SRCALPHA;
-    trans_cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
-    pvr_poly_compile(&s_translucent_hdr, &trans_cxt);
-
-    s_in_translucent = false;
     return true;
 }
 
-void Graphics::beginFrame() {
-    pvr_scene_begin();
-    pvr_list_begin(PVR_LIST_OP_POLY);
-    s_in_translucent = false;
+void GameEngine::loadChart(const NoteChart* chart) {
+    m_activeChart = chart;
+    m_readHead    = 0;
+    m_isStreamingMode = (chart == nullptr);
+
+    m_streamHead = 0;
+    m_streamTail = 0;
+
+    const uint16_t count = (!chart) ? 0u 
+                         : (chart->noteCount < MAX_NOTES_PER_CHART) 
+                           ? chart->noteCount : MAX_NOTES_PER_CHART;
+
+    for (uint16_t i = 0; i < count; ++i) {
+        m_noteStates[i].hitResult = 0;
+        m_noteStates[i].holdPhase = HoldState::Inactive;
+    }
 }
 
-void Graphics::endFrame() {
-    // Close whatever list segment we happen to still be handling natively
-    pvr_list_end();
-    pvr_scene_end();
+void GameEngine::resetScoreCounters() {
+    m_score     = 0;
+    m_combo     = 0;
+    m_missCount = 0;
+    resetPuzzleGrid();
 }
 
-// Intercept handles state changes inside the game engine execution thread safely
-void switchToOpaqueList() {
-    pvr_list_end();
-    pvr_list_begin(PVR_LIST_OP_POLY);
-    s_in_translucent = false;
+void GameEngine::resetPuzzleGrid() {
+    m_puzzleGrid[0] = 0; m_puzzleGrid[1] = 0; m_puzzleGrid[2] = 0;
+    m_gridHeights[0] = 0; m_gridHeights[1] = 0; m_gridHeights[2] = 0;
 }
 
-void switchToTranslucentList() {
-    pvr_list_end();
-    pvr_list_begin(PVR_LIST_TR_POLY);
-    s_in_translucent = true;
+// =============================================================================
+// ZERO-ALLOCATION LOW-LATENCY PARTICLE STRUCT MECHANICS
+// =============================================================================
+
+void GameEngine::spawnBurst(uint8_t lane, uint8_t count) {
+    if (lane >= 3) return; 
+    uint8_t spawned = 0;
+
+    for (uint8_t i = 0; i < MAX_PARTICLES && spawned < count; ++i) {
+        if (m_particles[i].lifetime != 0) continue;
+
+        const int16_t xSpread = static_cast<int16_t>((static_cast<int16_t>(i % 7) - 3) << 5);
+
+        m_particles[i].posX       = static_cast<PAL::SFP16>(LANE_X[lane] + xSpread);
+        m_particles[i].posY       = LANE_HIT_Y;
+        m_particles[i].velY       = PARTICLE_VEL_Y - static_cast<int16_t>(spawned << 5);
+        m_particles[i].lifetime   = PARTICLE_LIFE;
+        m_particles[i].colorIndex = lane;
+        
+        ++spawned;
+    }
 }
 
-void switchToPunchThroughList() {
-    pvr_list_end();
-    pvr_list_begin(PVR_LIST_PT_POLY);
-    s_in_translucent = false; 
+void GameEngine::tickParticles() {
+    for (uint8_t i = 0; i < MAX_PARTICLES; ++i) {
+        if (m_particles[i].lifetime == 0) continue;
+        --m_particles[i].lifetime;
+        m_particles[i].posY = static_cast<PAL::SFP16>(m_particles[i].posY + m_particles[i].velY);
+    }
 }
 
-// ── DRAW PARTICLE (Translucent Billboard Quad) ───────────────────────────────
-void Graphics::drawParticle(SFP16 x, SFP16 y, SFP16 size, uint8_t color, uint8_t alpha) {
-    float fx = sfp16_to_float(x);
-    float fy = sfp16_to_float(y);
-    float h_size = sfp16_to_float(size) * 0.5f;
+// =============================================================================
+// BIT-PACKED NIBBLE MATCHING MATRIX SYSTEM (High-Efficiency Execution)
+// =============================================================================
 
-    // Resolve color and override alpha parameter bits
-    uint32_t argb = (kColorLUT[color & 0x07] & 0x00FFFFFF) | (static_cast<uint32_t>(alpha) << 24);
+bool GameEngine::pushBlockToGrid(uint8_t lane, uint8_t blockType) {
+    if (lane >= 3 || blockType == 0) return false;
+    uint8_t height = m_gridHeights[lane];
 
-    pvr_vertex_t vert;
-    vert.flags = PVR_VERTEX_NORMAL;
-    vert.argb = argb;
-    vert.oargb = 0;
+    if (height >= GRID_MAX_ROWS) return true; // Column Overflowed
 
-    // Submit a standard screen-space facing billboard quad
-    vert.x = fx - h_size; vert.y = fy + h_size; vert.z = 10.0f;
-    pvr_prim(&vert, sizeof(vert));
+    // Inject block value into targeted 3-bit slot position segment
+    uint16_t shiftAmount = height * 3;
+    m_puzzleGrid[lane] |= (static_cast<uint16_t>(blockType & 0x07) << shiftAmount);
+    m_gridHeights[lane]++;
 
-    vert.x = fx - h_size; vert.y = fy - h_size; vert.z = 10.0f;
-    pvr_prim(&vert, sizeof(vert));
+    // Scan matrix configuration immediately unless block is an obstacle block
+    if (blockType != 3) {
+        checkAndResolveMatches();
+    }
 
-    vert.x = fx + h_size; vert.y = fy + h_size; vert.z = 10.0f;
-    pvr_prim(&vert, sizeof(vert));
-
-    vert.flags = PVR_VERTEX_EOL;
-    vert.x = fx + h_size; vert.y = fy - h_size; vert.z = 10.0f;
-    pvr_prim(&vert, sizeof(vert));
+    return (m_gridHeights[lane] >= GRID_MAX_ROWS);
 }
 
-// ── DRAW BLOCK (Unrolled 3D Polygon Cube Strip) ─────────────────────────────
-void Graphics::drawBlock(SFP16 x, SFP16 y, SFP16 z, uint8_t type) {
-    float fx = sfp16_to_float(x);
-    float fy = sfp16_to_float(y);
-    float fz = sfp16_to_float(z) + 1.0f; // Shift depth so near plane scales nicely
-    
-    float size = 16.0f / fz; // Basic perspective divide shortcut
-    uint32_t color = kColorLUT[type & 0x07];
+void GameEngine::checkAndResolveMatches() {
+    bool foundMatch = false;
+    uint8_t markedMasks[3] = {0, 0, 0}; // Individual bits 0-5 track cells flagged for erasure
 
-    // Direct Header Submission
-    pvr_poly_hdr_t* target_hdr = s_in_translucent ? &s_translucent_hdr : &s_opaque_hdr;
-    pvr_prim(target_hdr, sizeof(pvr_poly_hdr_t));
+    // Unpack board lane variables cleanly to read types
+    uint8_t unpackedGrid[3][6];
+    for (uint8_t l = 0; l < 3; ++l) {
+        uint16_t currentLaneData = m_puzzleGrid[l];
+        for (uint8_t r = 0; r < m_gridHeights[l]; ++r) {
+            unpackedGrid[l][r] = (currentLaneData >> (r * 3)) & 0x07;
+        }
+    }
 
-    pvr_vertex_t vert;
-    vert.flags = PVR_VERTEX_NORMAL;
-    vert.argb = color;
-    vert.oargb = 0;
-
-    // Draw Front Facing Quad Strip
-    vert.x = fx - size; vert.y = fy + size; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-    vert.x = fx - size; vert.y = fy - size; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-    vert.x = fx + size; vert.y = fy + size; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-    
-    vert.flags = PVR_VERTEX_EOL;
-    vert.x = fx + size; vert.y = fy - size; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-}
-
-// ── DRAW VOXEL HIGHWAY CORRIDOR STRIP ────────────────────────────────────────
-void Graphics::drawVoxelColumn(SFP16 x1, SFP16 x2, SFP16 y1, SFP16 y2, SFP16 z, uint8_t songId) {
-    float fx1 = sfp16_to_float(x1);
-    float fx2 = sfp16_to_float(x2);
-    float fy1 = sfp16_to_float(y1);
-    float fy2 = sfp16_to_float(y2);
-    float fz  = sfp16_to_float(z);
-
-    uint32_t color = kColorLUT[songId & 0x07];
-
-    pvr_prim(&s_opaque_hdr, sizeof(pvr_poly_hdr_t));
-
-    pvr_vertex_t vert;
-    vert.flags = PVR_VERTEX_NORMAL;
-    vert.argb = color;
-    vert.oargb = 0;
-
-    // Map long flat 3D horizon highway floor boards
-    vert.x = fx1; vert.y = 480.0f - fy1; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-    vert.x = fx1; vert.y = 240.0f - fy2; vert.z = fz + 50.0f;
-    pvr_prim(&vert, sizeof(vert));
-    vert.x = fx2; vert.y = 480.0f - fy1; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-
-    vert.flags = PVR_VERTEX_EOL;
-    vert.x = fx2; vert.y = 240.0f - fy2; vert.z = fz + 50.0f;
-    pvr_prim(&vert, sizeof(vert));
-}
-
-void Graphics::drawVoxelColumnGlow(SFP16 x1, SFP16 x2, SFP16 y1, SFP16 y2, SFP16 z, uint8_t songId, uint8_t alpha) {
-    // Intercept redirects code to translucent rendering properties automatically
-    bool elementsState = s_in_translucent;
-    if (!elementsState) pvr_list_begin(PVR_LIST_TR_POLY);
-
-    float fx1 = sfp16_to_float(x1);
-    float fx2 = sfp16_to_float(x2);
-    float fy1 = sfp16_to_float(y1);
-    float fy2 = sfp16_to_float(y2);
-    float fz  = sfp16_to_float(z);
-
-    uint32_t argb = (kColorLUT[songId & 0x07] & 0x00FFFFFF) | (static_cast<uint32_t>(alpha) << 24);
-
-    pvr_prim(&s_translucent_hdr, sizeof(pvr_poly_hdr_t));
-
-    pvr_vertex_t vert;
-    vert.flags = PVR_VERTEX_NORMAL;
-    vert.argb = argb;
-    vert.oargb = 0;
-
-    vert.x = fx1; vert.y = fy2; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-    vert.x = fx1; vert.y = fy1; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-    vert.x = fx2; vert.y = fy2; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-
-    vert.flags = PVR_VERTEX_EOL;
-    vert.x = fx2; vert.y = fy1; vert.z = fz;
-    pvr_prim(&vert, sizeof(vert));
-
-    if (!elementsState) pvr_list_begin(PVR_LIST_OP_POLY);
-}
-
-// Helper to unpack 3x5 font arrays onto screen using direct primitive drawing
-static void draw_glyph(float x, float y, char c, uint32_t color) {
-    uint8_t idx = 0;
-    if (c >= '0' && c <= '9') idx = c - '0';
-    else if (c == 'C') idx = 10;
-    else if (c == 'M') idx = 11;
-    else if (c == 'P') idx = 12;
-    else if (c == 'S') idx = 13;
-    else return;
-
-    uint16_t glyph = kFontLUT[idx];
-    float pixel_size = 2.0f;
-
-    for (int row = 0; row < 5; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            // Check bit representation inside the uint16 structure matrix
-            if (glyph & (1 << (14 - (row * 3 + col)))) {
-                float px = x + (col * pixel_size);
-                float py = y + (row * pixel_size);
-
-                pvr_vertex_t vert;
-                vert.flags = PVR_VERTEX_NORMAL;
-                vert.argb = color;
-                vert.oargb = 0;
-
-                vert.x = px; vert.y = py + pixel_size; vert.z = 1.0f;
-                pvr_prim(&vert, sizeof(vert));
-                vert.x = px; vert.y = py; vert.z = 1.0f;
-                pvr_prim(&vert, sizeof(vert));
-                vert.x = px + pixel_size; vert.y = py + pixel_size; vert.z = 1.0f;
-                pvr_prim(&vert, sizeof(vert));
-
-                vert.flags = PVR_VERTEX_EOL;
-                vert.x = px + pixel_size; vert.y = py; vert.z = 1.0f;
-                pvr_prim(&vert, sizeof(vert));
+    // 1. Scan Vertical Lanes
+    for (uint8_t l = 0; l < 3; ++l) {
+        if (m_gridHeights[l] < 3) continue;
+        for (uint8_t r = 0; r <= m_gridHeights[l] - 3; ++r) {
+            uint8_t color = unpackedGrid[l][r];
+            if (color == 0 || color == 3) continue;
+            if (unpackedGrid[l][r+1] == color && unpackedGrid[l][r+2] == color) {
+                markedMasks[l] |= (7 << r); // Sets consecutive bits for match span row positions
+                foundMatch = true;
             }
+        }
+    }
+
+    // 2. Scan Horizontal Rows
+    for (uint8_t r = 0; r < GRID_MAX_ROWS; ++r) {
+        if (m_gridHeights[0] <= r || m_gridHeights[1] <= r || m_gridHeights[2] <= r) continue;
+        uint8_t color = unpackedGrid[0][r];
+        if (color == 0 || color == 3) continue;
+        if (unpackedGrid[1][r] == color && unpackedGrid[2][r] == color) {
+            markedMasks[0] |= (1 << r);
+            markedMasks[1] |= (1 << r);
+            markedMasks[2] |= (1 << r);
+            foundMatch = true;
+        }
+    }
+
+    // 3. Bitwise Column Compression
+    if (foundMatch) {
+        uint8_t totalCleared = 0;
+        for (uint8_t l = 0; l < 3; ++l) {
+            if (markedMasks[l] == 0) continue;
+
+            uint16_t newLaneVal = 0;
+            uint8_t writeIdx = 0;
+            for (uint8_t r = 0; r < m_gridHeights[l]; ++r) {
+                if (markedMasks[l] & (1 << r)) {
+                    ++totalCleared;
+                    continue; // Purge block by skipping insertion index updates
+                }
+                newLaneVal |= (static_cast<uint16_t>(unpackedGrid[l][r]) << (writeIdx * 3));
+                ++writeIdx;
+            }
+            m_puzzleGrid[l] = newLaneVal;
+            m_gridHeights[l] = writeIdx;
+        }
+
+        m_score += static_cast<uint16_t>(totalCleared * 500u * (m_combo > 0 ? (m_combo >> 2) + 1 : 1));
+        spawnBurst(1, totalCleared * 2);
+    }
+}
+
+// =============================================================================
+// HYBRID MODE FORWARD CHART VECTOR WORKER (Supports Pointer & Ring Buffers)
+// =============================================================================
+
+FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState pressed) {
+    FrameResult result = {0, 0, 0, 0, 0};
+
+    if (m_isStreamingMode) {
+        if (m_streamHead == m_streamTail) return result;
+
+        if (trackPos > WINDOW_MISS) {
+            const PAL::FP16 missFloor = static_cast<PAL::FP16>(trackPos - WINDOW_MISS);
+            while (m_streamHead != m_streamTail) {
+                uint16_t headIdx = m_streamHead & RING_BUFFER_MASK;
+                if (m_streamingNotes[headIdx].timeline >= missFloor) break;
+                
+                if (m_streamingNoteStates[headIdx].hitResult == 0) {
+                    m_streamingNoteStates[headIdx].hitResult = 3; 
+                    ++result.missCount;
+                }
+                ++m_streamHead;
+            }
+        }
+
+        const uint16_t scanLimit = m_streamTail;
+        for (uint16_t i = m_streamHead; i != scanLimit; ++i) {
+            uint16_t idx = i & RING_BUFFER_MASK;
+            const Note& note = m_streamingNotes[idx];
+            NoteState& state = m_streamingNoteStates[idx];
+
+            if (note.timeline > (trackPos + WINDOW_GOOD)) break;
+            if (state.hitResult != 0) continue;
+
+            const bool laneBit = (pressed & LANE_MASKS[note.lane]) != 0;
+            const PAL::FP16 delta = fp16AbsDelta(trackPos, note.timeline);
+
+            if (laneBit) {
+                if (delta <= WINDOW_PERFECT) {
+                    state.hitResult = 1;
+                    ++result.perfectCount;
+                    spawnBurst(note.lane, BURST_COUNT);
+                    bool crashed = pushBlockToGrid(note.lane, note.flags); 
+                    if (crashed) ++result.holdDropCount;
+                } else if (delta <= WINDOW_GOOD) {
+                    state.hitResult = 2;
+                    ++result.goodCount;
+                    spawnBurst(note.lane, BURST_COUNT / 2u);
+                    bool crashed = pushBlockToGrid(note.lane, note.flags);
+                    if (crashed) ++result.holdDropCount;
+                }
+            }
+        }
+        return result;
+    }
+
+    if (!m_activeChart) return result;
+
+    const uint16_t noteCount = (m_activeChart->noteCount < MAX_NOTES_PER_CHART)
+                               ? m_activeChart->noteCount : MAX_NOTES_PER_CHART;
+    if (m_readHead >= noteCount) return result;
+
+    if (trackPos > WINDOW_MISS) {
+        const PAL::FP16 missFloor = static_cast<PAL::FP16>(trackPos - WINDOW_MISS);
+        while (m_readHead < noteCount) {
+            const Note&  note  = m_activeChart->notes[m_readHead];
+            NoteState&   state = m_noteStates[m_readHead];
+
+            if (note.timeline >= missFloor) break;
+            if (state.hitResult == 0) {
+                state.hitResult = 3; 
+                ++result.missCount;
+            }
+            ++m_readHead;
+        }
+    }
+
+    const uint32_t  lookAheadRaw = static_cast<uint32_t>(trackPos) + WINDOW_GOOD;
+    const PAL::FP16 lookAhead    = (lookAheadRaw > 0xFFFFu) ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(lookAheadRaw);
+
+    for (uint16_t i = m_readHead; i < noteCount; ++i) {
+        const Note& note  = m_activeChart->notes[i];
+        NoteState&  state = m_noteStates[i];
+
+        if (note.timeline > lookAhead) break;
+
+        const bool laneBit = (pressed & LANE_MASKS[note.lane]) != 0;
+        const bool isHold  = (note.holdLength > 0);
+        const PAL::FP16 delta = fp16AbsDelta(trackPos, note.timeline);
+
+        if (!isHold) {
+            if (state.hitResult != 0) continue; 
+            if (laneBit) {
+                if (delta <= WINDOW_PERFECT) {
+                    state.hitResult = 1;
+                    ++result.perfectCount;
+                    spawnBurst(note.lane, BURST_COUNT);
+                    pushBlockToGrid(note.lane, note.flags);
+                } else if (delta <= WINDOW_GOOD) {
+                    state.hitResult = 2;
+                    ++result.goodCount;
+                    spawnBurst(note.lane, BURST_COUNT / 2u);
+                    pushBlockToGrid(note.lane, note.flags);
+                }
+            }
+            continue;
+        }
+
+        switch (state.holdPhase) {
+            case HoldState::Inactive:
+                if (laneBit && delta <= WINDOW_GOOD) {
+                    state.holdPhase = HoldState::Gating;
+                    state.hitResult = (delta <= WINDOW_PERFECT) ? 1u : 2u;
+                    spawnBurst(note.lane, BURST_COUNT);
+                }
+                break;
+
+            case HoldState::Gating: {
+                const uint32_t holdEndRaw = static_cast<uint32_t>(note.timeline) + note.holdLength;
+                const PAL::FP16 holdEnd   = (holdEndRaw > 0xFFFFu) ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(holdEndRaw);
+
+                if (trackPos >= holdEnd) {
+                    state.holdPhase = HoldState::Complete;
+                    spawnBurst(note.lane, BURST_COUNT);
+                } else if (!laneBit) {
+                    state.holdPhase = HoldState::DroppedEarly;
+                    state.hitResult = 3; 
+                    ++result.holdDropCount;
+                } else {
+                    ++result.activeHolds;
+                }
+                break;
+            }
+
+            case HoldState::Complete:
+            case HoldState::DroppedEarly:
+                break; 
+        }
+    }
+
+    return result;
+}
+
+void GameEngine::updateGameplaySimulation(PAL::InputState pressed) {
+    // --- DRIFT-RESISTANT COUNTER SYNCHRONIZATION HARDENING LAYER ---
+    m_syncTickCounter++;
+    
+    // Sub-query system: Only query hardware clock bounds once every 4 frames
+    if ((m_syncTickCounter & 0x03) == 0) {
+        PAL::FP16 hardwarePos = s_audio->getTrackProgress();
+        m_localTrackAccumulator = hardwarePos;
+    } else {
+        // Linearly step internal clock estimation using 60Hz frame pacing ticks (approx 0x0440 out of 0xFFFF scale bounds)
+        uint32_t predictedTrack = static_cast<uint32_t>(m_localTrackAccumulator) + 0x0440u;
+        m_localTrackAccumulator = (predictedTrack > 0xFFFFu) ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(predictedTrack);
+    }
+
+    if (m_localTrackAccumulator >= 0xFFFF) {
+        s_audio->stop();
+        m_currentState = EngineState::ResultsScreen;
+        return;
+    }
+
+    const FrameResult fr = evaluateChart(m_localTrackAccumulator, pressed);
+
+    const uint8_t totalHits  = fr.perfectCount + fr.goodCount;
+    const uint8_t totalMiss  = fr.missCount    + fr.holdDropCount;
+
+    m_score     += static_cast<uint16_t>(fr.perfectCount * 300u) + static_cast<uint16_t>(fr.goodCount * 100u);
+    m_combo      = (totalMiss > 0) ? 0u : static_cast<uint16_t>(m_combo + totalHits);
+    m_missCount += totalMiss;
+
+    tickParticles();
+}
+
+// =============================================================================
+// PLATFORM ENGINE TICK ROUTINES
+// =============================================================================
+
+void GameEngine::tick() {
+    s_input->poll();
+    PAL::InputState pressed = s_input->readPressedActions();
+
+    switch (m_currentState) {
+        case EngineState::TitleScreen:
+            if (pressed != 0) m_currentState = EngineState::SongSelect;
+            break;
+
+        case EngineState::SongSelect:
+            if (pressed & static_cast<PAL::InputState>(PAL::InputAction::LaneLeft)) { 
+                if (m_selectedSong > 0) --m_selectedSong;
+            }
+            if (pressed & static_cast<PAL::InputState>(PAL::InputAction::LaneRight)) { 
+                if (m_selectedSong < (TOTAL_SONGS - 1)) ++m_selectedSong;
+            }
+            if (pressed & static_cast<PAL::InputState>(PAL::InputAction::Confirm)) {
+                if (m_selectedSong == CD_STREAM_TRACK_ID) {
+                    loadChart(nullptr); 
+                } else {
+                    loadChart(kSongTable[m_selectedSong]);
+                }
+                resetScoreCounters();
+                s_audio->play(m_selectedSong);
+                m_currentState = EngineState::Gameplay;
+            }
+            break;
+
+        case EngineState::Gameplay:
+            updateGameplaySimulation(pressed);
+            break;
+
+        case EngineState::ResultsScreen:
+            if (pressed & static_cast<PAL::InputState>(PAL::InputAction::Confirm)) {
+                m_currentState = EngineState::SongSelect;
+            }
+            break;
+    }
+}
+
+// =============================================================================
+// STREAM RENDERING GENERATION PIPELINE 
+// =============================================================================
+
+void GameEngine::render() {
+    s_graphics->beginFrame();
+
+    switch (m_currentState) {
+        case EngineState::TitleScreen:   renderTitleScreen();    break;
+        case EngineState::SongSelect:    renderSongSelectMenu(); break;
+        case EngineState::Gameplay:      renderGameplayScene();  break;
+        case EngineState::ResultsScreen: renderResultsScreen();  break;
+    }
+
+    s_graphics->endFrame();
+}
+
+void GameEngine::renderParticles() const {
+    for (uint8_t i = 0; i < MAX_PARTICLES; ++i) {
+        if (m_particles[i].lifetime == 0) continue;
+
+        // Optimized zero-overhead table indexing step
+        const uint8_t alpha = kAlphaLUT[m_particles[i].lifetime & 0x0F];
+
+        s_graphics->drawParticle(
+            m_particles[i].posX, m_particles[i].posY,
+            static_cast<PAL::SFP16>(2 << 8), 
+            m_particles[i].colorIndex, alpha
+        );
+    }
+}
+
+void GameEngine::renderGameplayScene() const {
+    const uint8_t energy = s_audio->getEnergyLevel();
+
+    const uint32_t viewLookAheadRaw = static_cast<uint32_t>(m_localTrackAccumulator) + 0x1C00u;
+    const uint16_t viewLookAhead    = (viewLookAheadRaw > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(viewLookAheadRaw);
+
+    // ── 1. Draw Voxel Highway Footprint Corridor (Opaque) ────────────────────
+    const PAL::SFP16 height = static_cast<PAL::SFP16>(energy << 7);
+    s_graphics->drawVoxelColumn(
+        static_cast<PAL::SFP16>(200 << 8), static_cast<PAL::SFP16>(440 << 8),
+        static_cast<PAL::SFP16>(0   << 8), height,
+        static_cast<PAL::SFP16>(20  << 8), m_selectedSong
+    );
+
+    // ── 2. Draw Match-3 Matrix Grid Blocks (Opaque Bottom Stack) ─────────────
+    for (uint8_t l = 0; l < 3; ++l) {
+        uint16_t laneData = m_puzzleGrid[l];
+        for (uint8_t r = 0; r < m_gridHeights[l]; ++r) {
+            uint8_t cellType = (laneData >> (r * 3)) & 0x07;
+            if (cellType == 0) continue;
+
+            PAL::SFP16 gridX = LANE_X[l];
+            PAL::SFP16 gridY = static_cast<PAL::SFP16>(GRID_BASE_Y - (r * GRID_BLOCK_SPACING));
+            s_graphics->drawBlock(gridX, gridY, static_cast<PAL::SFP16>(1 << 8), cellType);
+        }
+    }
+
+    // ── 3. Streaming Note Blocks Lookahead Engine (Opaque Entities) ──────────
+    if (m_isStreamingMode) {
+        uint16_t scanIdx = m_streamHead;
+        const uint16_t limitIdx = m_streamTail;
+        
+        while (scanIdx != limitIdx) {
+            uint16_t idx = scanIdx & RING_BUFFER_MASK;
+            const Note& note = m_streamingNotes[idx];
+
+            if (note.timeline > viewLookAhead) break;
+
+            if (m_streamingNoteStates[idx].hitResult == 0) {
+                int32_t delta = static_cast<int32_t>(note.timeline) - static_cast<int32_t>(m_localTrackAccumulator);
+                PAL::SFP16 visualZ = static_cast<PAL::SFP16>((delta * 24) >> 8);
+                PAL::SFP16 targetY = LANE_HIT_Y - (visualZ << 2) + (energy << 3);
+
+                s_graphics->drawBlock(LANE_X[note.lane], targetY, visualZ, note.flags);
+            }
+            scanIdx++;
+        }
+    } else if (m_activeChart) {
+        uint16_t scanIdx = m_readHead;
+        const uint16_t noteCount = (m_activeChart->noteCount < MAX_NOTES_PER_CHART)
+                                   ? m_activeChart->noteCount : MAX_NOTES_PER_CHART;
+
+        while (scanIdx < noteCount && m_activeChart->notes[scanIdx].timeline <= viewLookAhead) {
+            if (m_noteStates[scanIdx].hitResult == 0) {
+                const Note& note = m_activeChart->notes[scanIdx];
+                int32_t delta = static_cast<int32_t>(note.timeline) - static_cast<int32_t>(m_localTrackAccumulator);
+                PAL::SFP16 visualZ = static_cast<PAL::SFP16>((delta * 24) >> 8);
+                PAL::SFP16 targetY = LANE_HIT_Y - (visualZ << 2) + (energy << 3);
+
+                s_graphics->drawBlock(LANE_X[note.lane], targetY, visualZ, note.flags);
+            }
+            scanIdx++;
+        }
+    }
+
+    // ── 4. Particle Burst Engine Render Stream (Translucent) ─────────────────
+    renderParticles();
+
+    // ── 5. Standard Core HUD Interface Display (Punch-Through Overlay) ───────
+    s_graphics->drawHUD(m_score, m_combo, m_missCount, 0);
+}
+
+void GameEngine::renderTitleScreen() const {
+    s_graphics->drawVoxelColumnGlow(
+        static_cast<PAL::SFP16>(120 << 8), static_cast<PAL::SFP16>(520 << 8),
+        static_cast<PAL::SFP16>(200 << 8), static_cast<PAL::SFP16>(280 << 8),
+        static_cast<PAL::SFP16>(5   << 8), 2, 255
+    );
+    s_graphics->drawHUD(0, 0, 0, 0);
+}
+
+void GameEngine::renderSongSelectMenu() const {
+    // PASS 1: Submit ALL Opaque Menu Elements (Solid Core Cubes)
+    for (uint8_t i = 0; i < TOTAL_SONGS; ++i) {
+        if (i == m_selectedSong) {
+            const PAL::SFP16 xPos = static_cast<PAL::SFP16>((160 + (i * 160)) << 8);
+            const PAL::SFP16 yPos = static_cast<PAL::SFP16>(240 << 8);
+            const PAL::SFP16 zPos = static_cast<PAL::SFP16>(10  << 8);
+
+            s_graphics->drawBlock(xPos, yPos, zPos, i);
+        }
+    }
+
+    // PASS 2: Submit ALL Translucent Menu Overlays (Additive Blending Overlays)
+    for (uint8_t i = 0; i < TOTAL_SONGS; ++i) {
+        const PAL::SFP16 xPos = static_cast<PAL::SFP16>((160 + (i * 160)) << 8);
+        const PAL::SFP16 yPos = static_cast<PAL::SFP16>(240 << 8);
+        const PAL::SFP16 zPos = static_cast<PAL::SFP16>(10  << 8);
+
+        if (i == m_selectedSong) {
+            s_graphics->drawVoxelColumnGlow(
+                static_cast<PAL::SFP16>(xPos - (15 << 8)),
+                static_cast<PAL::SFP16>(xPos + (15 << 8)),
+                static_cast<PAL::SFP16>(yPos - (30 << 8)),
+                static_cast<PAL::SFP16>(yPos + (30 << 8)),
+                zPos, i, 160
+            );
+        } else {
+            s_graphics->drawParticle(xPos, yPos, zPos, i, 80);
         }
     }
 }
 
-void Graphics::drawHUD(uint16_t score, uint16_t combo, uint16_t miss, uint8_t flags) {
-    // Compile basic transparent header placeholder mapping structure
-    pvr_poly_hdr_t hud_hdr;
-    pvr_poly_cxt_t hud_cxt;
-    pvr_poly_cxt_col(&hud_cxt, PVR_LIST_PT_POLY);
-    pvr_poly_compile(&hud_hdr, &hud_cxt);
-    pvr_prim(&hud_hdr, sizeof(hud_hdr));
-
-    // Simple buffer extraction string routine bypass logic
-    char buf[16];
-    
-    // Draw Score: "S 00000"
-    draw_glyph(20.0f, 20.0f, 'S', 0xFFFFFFFF);
-    int len = snprintf(buf, sizeof(buf), "%05d", score);
-    for (int i = 0; i < len; ++i) {
-        draw_glyph(32.0f + (i * 8.0f), 20.0f, buf[i], 0xFFFFFFFF);
-    }
-
-    // Draw Combo: "C 00"
-    draw_glyph(20.0f, 36.0f, 'C', 0xFF00FF00);
-    len = snprintf(buf, sizeof(buf), "%02d", combo);
-    for (int i = 0; i < len; ++i) {
-        draw_glyph(32.0f + (i * 8.0f), 36.0f, buf[i], 0xFF00FF00);
-    }
-
-    // Draw Misses: "M 00"
-    draw_glyph(20.0f, 52.0f, 'M', 0xFFFF0000);
-    len = snprintf(buf, sizeof(buf), "%02d", miss);
-    for (int i = 0; i < len; ++i) {
-        draw_glyph(32.0f + (i * 8.0f), 52.0f, buf[i], 0xFFFF0000);
-    }
+void GameEngine::renderResultsScreen() const {
+    s_graphics->drawBlock(static_cast<PAL::SFP16>(320 << 8), static_cast<PAL::SFP16>(240 << 8), static_cast<PAL::SFP16>(15 << 8), 7);
+    s_graphics->drawHUD(m_score, m_combo, m_missCount, 0);
 }
 
-// ---------------------------------------------------------------------------
-// Audio Implementation (AICA CDDA streaming layer bypass)
-// ---------------------------------------------------------------------------
+bool GameEngine::isRunning() const { return m_isRunning; }
 
-bool Audio::init() {
-    snd_init();
-    return true;
-}
-
-void Audio::play(uint8_t songId) {
-    // Track ID 7 maps natively to live analog fallback streaming track loops
-    if (songId == 7) {
-        cdrom_cdda_play(7, 7, 0, CDDA_TRACKS);
-    }
-}
-
-void Audio::stop() {
-    cdrom_cdda_pause();
-}
-
-uint16_t Audio::getTrackProgress() {
-    // Read play position tracking values from CDDA sectors
-    int sector = cdrom_cdda_get_each_frame();
-    return static_cast<uint16_t>(sector & 0xFFFF);
-}
-
-uint8_t Audio::getEnergyLevel() {
-    // Hardware monitoring abstraction layer placeholder stub values
-    return 32;
-}
-
-// ---------------------------------------------------------------------------
-// Input Implementation (Maple Controller Architecture Bus Interface)
-// ---------------------------------------------------------------------------
-
-bool Input::init() {
-    return true;
-}
-
-void Input::poll() {
-    // KallistiOS handles driver updates automatically via system loop triggers
-}
-
-InputState Input::readPressedActions() {
-    maple_device_t* cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-    if (!cont) return 0;
-
-    cont_state_t* state = (cont_state_t*)maple_dev_status(cont);
-    if (!state) return 0;
-
-    InputState pressed = 0;
-
-    // Map D-Pad buttons onto Lane Trigger masks
-    if (state->buttons & CONT_DPAD_LEFT)  pressed |= (1 << 0);
-    if (state->buttons & CONT_DPAD_DOWN)  pressed |= (1 << 1);
-    if (state->buttons & CONT_DPAD_RIGHT) pressed |= (1 << 2);
-    
-    // Map A Button onto Confirm Actions
-    if (state->buttons & CONT_A) {
-        pressed |= static_cast<InputState>(InputAction::Confirm);
-    }
-
-    return pressed;
-}
-
-} // namespace PAL
+} // namespace Engine
