@@ -39,6 +39,7 @@ bool GameEngine::init(const PAL::PlatformBundle& bundle, uint8_t initialSongId) 
     // Initialize Puzzle Board State Matrix to Empty
     resetPuzzleGrid();
 
+    m_isRunning = true; // Secure explicit operational state state loop boundary
     return true;
 }
 
@@ -82,7 +83,7 @@ void GameEngine::resetPuzzleGrid() {
 // =============================================================================
 
 void GameEngine::spawnBurst(uint8_t lane, uint8_t count) {
-    if (lane >= 4) return;
+    if (lane >= 3) return; // Restrict strictly to valid puzzle board lane arrays
     uint8_t spawned = 0;
 
     for (uint8_t i = 0; i < MAX_PARTICLES && spawned < count; ++i) {
@@ -148,7 +149,7 @@ void GameEngine::checkAndResolveMatches() {
             uint8_t color = m_puzzleGrid[l][r];
             if (color == 0 || color == 3) continue; // Skip empty and grey blocks
             if (m_puzzleGrid[l][r+1] == color && m_puzzleGrid[l][r+2] == color) {
-                marked[l][r] = true;   marked[l][r+1] = true; m_marked[l][r+2] = true;
+                marked[l][r] = true;   marked[l][r+1] = true; marked[l][r+2] = true;
                 foundMatch = true;
             }
         }
@@ -279,7 +280,7 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
 
     const uint32_t  lookAheadRaw = static_cast<uint32_t>(trackPos) + WINDOW_GOOD;
     const PAL::FP16 lookAhead    = (lookAheadRaw > 0xFFFFu)
-                                 ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(lookAheadRaw);
+                                  ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(lookAheadRaw);
 
     for (uint16_t i = m_readHead; i < noteCount; ++i) {
         const Note& note  = m_activeChart->notes[i];
@@ -452,6 +453,10 @@ void GameEngine::renderGameplayScene() const {
     const PAL::FP16 trackPos = static_cast<PAL::FP16>(s_audio->getTrackProgress());
     const uint8_t energy = s_audio->getEnergyLevel();
 
+    // Promote rendering timeline bounds to uint32 to prevent 16-bit wrap-around clipping
+    const uint32_t viewLookAheadRaw = static_cast<uint32_t>(trackPos) + 0x1C00u;
+    const uint16_t viewLookAhead    = (viewLookAheadRaw > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(viewLookAheadRaw);
+
     // ── 1. Draw Voxel Highway Footprint Corridor ─────────────────────────────
     const PAL::SFP16 height = static_cast<PAL::SFP16>(energy << 7);
     s_graphics->drawVoxelColumn(
@@ -482,7 +487,7 @@ void GameEngine::renderGameplayScene() const {
             uint16_t idx = scanIdx & RING_BUFFER_MASK;
             const Note& note = m_streamingNotes[idx];
 
-            if (note.timeline > (trackPos + 0x1C00)) break;
+            if (note.timeline > viewLookAhead) break;
 
             if (m_streamingNoteStates[idx].hitResult == 0) {
                 int32_t delta = static_cast<int32_t>(note.timeline) - static_cast<int32_t>(trackPos);
@@ -498,7 +503,7 @@ void GameEngine::renderGameplayScene() const {
         const uint16_t noteCount = (m_activeChart->noteCount < MAX_NOTES_PER_CHART)
                                    ? m_activeChart->noteCount : MAX_NOTES_PER_CHART;
 
-        while (scanIdx < noteCount && m_activeChart->notes[scanIdx].timeline <= (trackPos + 0x1C00)) {
+        while (scanIdx < noteCount && m_activeChart->notes[scanIdx].timeline <= viewLookAhead) {
             if (m_noteStates[scanIdx].hitResult == 0) {
                 const Note& note = m_activeChart->notes[scanIdx];
                 int32_t delta = static_cast<int32_t>(note.timeline) - static_cast<int32_t>(trackPos);
