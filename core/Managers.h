@@ -44,11 +44,11 @@ public:
     }
 
     /// Returns the index of the first segment that needs data.
-    /// Hardened to guarantee correct ring wrapping regardless of FP16 container size.
+    /// Safely handles fixed-point integer coordinate bit scaling.
     uint8_t firstDirtyAhead(FP16 currentPos) const
     {
-        uint16_t forwardPos = static_cast<uint16_t>(currentPos + 256u); 
-        return static_cast<uint8_t>(forwardPos >> 8);
+        uint32_t forwardPos = static_cast<uint32_t>(currentPos) + (LOOK_AHEAD_SEGMENTS << 8); 
+        return fp_block_index(static_cast<FP16>(forwardPos));
     }
 
     // Public allocation space
@@ -102,6 +102,7 @@ public:
     /// Test a block against the player and despawn on hit.
     uint8_t testCollect(Block& block, FP16 playerTrackPos, uint8_t playerLane)
     {
+        // Guard against duplicate reads on dead pool slots instantly
         if (!block.isActive) return 0;
         if (static_cast<uint8_t>(block.lane) != playerLane) return 0;
 
@@ -109,7 +110,7 @@ public:
         SFP16 dist = static_cast<SFP16>(block.trackPos - playerTrackPos);
         if (fp_abs(dist) < BLOCK_SNAP_DIST) {
             uint8_t sv = block.scoreValue;
-            despawn(block);
+            despawn(block); // Invalidates active flags immediately before extraction flags clear
             return sv;
         }
         return 0;
@@ -166,16 +167,18 @@ public:
             Particle& p = particles[i];
             if (!p.isActive) continue;
 
+            // Check if particle has reached the end of its life before updating physics
+            if (p.life == 0) {
+                p.isActive = false;
+                continue;
+            }
+            --p.life;
+
+            // Apply equations of motion only to valid, active elements
             p.x  = static_cast<SFP16>(p.x + p.vx);
             p.y  = static_cast<SFP16>(p.y + p.vy);
             p.z  = static_cast<SFP16>(p.z + p.vz);
             p.vy = static_cast<SFP16>(p.vy - GRAVITY_FP);
-
-            if (p.life == 0) { 
-                p.isActive = false; 
-            } else { 
-                --p.life; 
-            }
         }
     }
 
