@@ -28,9 +28,9 @@ namespace Engine::Charts {
 // Each symbol is defined in its corresponding Song##.cpp translation unit.
 // The extern linkage means this header can be included in multiple TUs
 // without producing duplicate-symbol linker errors.
-extern const NoteChart kSong00_Chart; // stress-test track  (120 BPM, 4/4)
-extern const NoteChart kSong01_Chart; // reserved slot
-extern const NoteChart kSong02_Chart; // reserved slot
+extern const NoteChart kSong00_Chart; // Album Track 1 (e.g., November Wind)
+extern const NoteChart kSong01_Chart; // Album Track 2 (e.g., I Just Want My Soul)
+extern const NoteChart kSong02_Chart; // Album Track 3 (e.g., Something Will Grow)
 
 // ── Chart lookup table ────────────────────────────────────────────────────────
 // Indexed directly by GameEngine::m_selectedSong.
@@ -41,7 +41,10 @@ extern const NoteChart kSong02_Chart; // reserved slot
 // Pointer array rather than reference array: pointers are nullable, which
 // lets us assert against a null slot at loadChart() time rather than
 // dereferencing a dangling reference.
-extern const NoteChart* const kSongTable[3];
+//
+// NOTE: Slot [3] is reserved for CD_STREAM_TRACK_ID (99) / External Audio Stream mode,
+// which points to nullptr to explicitly trigger the real-time ring buffer engine.
+extern const NoteChart* const kSongTable[4];
 
 } // namespace Engine::Charts
 
