@@ -42,7 +42,7 @@ static constexpr uint16_t PARTICLE_POOL_SIZE  = 512;
 // ---------------------------------------------------------------------------
 // Size: Exactly 36 Bytes (Aligned to 4-byte boundaries for SH-4 performance)
 // ---------------------------------------------------------------------------
-struct VoxelSegment
+struct alignas(4) VoxelSegment
 {
     /// Vertical extrusion per column, range [0, 15].
     uint8_t heightMap[TRACK_WIDTH_VOXELS];
@@ -79,9 +79,9 @@ struct VoxelSegment
 // ---------------------------------------------------------------------------
 // Block
 // ---------------------------------------------------------------------------
-// Size: Exactly 8 Bytes (Optimized footprint for low L1 cache usage)
+// Size: Exactly 4 Bytes (Halved cache footprint, absolute 32-bit aligned)
 // ---------------------------------------------------------------------------
-struct Block
+struct alignas(4) Block
 {
     /// Position along the song timeline in global FP16 coordinates (2 bytes).
     FP16    trackPos;
@@ -95,9 +95,6 @@ struct Block
     uint8_t isActive   : 1;  ///< Object-pool status flag.
     uint8_t reserved   : 1;  ///< Leftover bit padding.
 
-    /// Additional padding to lock struct to a clean 32-bit boundary alignment (4 bytes).
-    uint8_t structuralPadding[4];
-
     void reset()
     {
         trackPos   = 0;
@@ -106,10 +103,6 @@ struct Block
         colorIndex = 0;
         isActive   = false;
         reserved   = 0;
-        
-        for(uint8_t i = 0; i < 4; ++i) {
-            structuralPadding[i] = 0;
-        }
     }
 };
 
@@ -118,10 +111,10 @@ struct Block
 // ---------------------------------------------------------------------------
 // Size: Exactly 16 Bytes (Perfect alignment for SH-4 cache-line prefetching)
 // ---------------------------------------------------------------------------
-struct Particle
+struct alignas(4) Particle
 {
     SFP16   x, y, z;     ///< World-space position (Q8.8) -> 6 bytes
-    SFP16   vx, vy, vz;  ///< Velocity per tick (Q8.8)     -> 6 bytes
+    SFP16   vx, vy, vz;  ///< Velocity per tick (Q8.8)      -> 6 bytes
     uint8_t colorIndex;  ///< Palette index                -> 1 byte
     uint8_t life;        ///< Remaining lifetime in ticks  -> 1 byte
     bool    isActive;    ///< Execution allocation state   -> 1 byte
@@ -143,7 +136,7 @@ struct Particle
 // ---------------------------------------------------------------------------
 // Size: Exactly 12 Bytes (Clean 32-bit multiple alignment profile)
 // ---------------------------------------------------------------------------
-struct Player
+struct alignas(4) Player
 {
     /// Smooth lane-slide interpolation position (Q8.8).
     /// 0 = fully in current lane, FP_ONE = fully in target lane.
@@ -179,11 +172,13 @@ struct Player
     }
 
     /// Returns the Q8.8 render X position of the player along the track width.
-    /// LANE_WIDTH_FP must be defined as a compile-time FP16 constant by caller.
+    /// Handles left and right structural transitions seamlessly.
     inline FP16 renderX(FP16 laneWidthFP) const
     {
-        FP16 base = static_cast<FP16>(static_cast<FP16>(lane) * laneWidthFP);
-        return static_cast<FP16>(base + fp_lerp(0, laneWidthFP, static_cast<uint8_t>(laneOffset)));
+        FP16 currentLaneX = static_cast<FP16>(static_cast<FP16>(lane) * laneWidthFP);
+        FP16 targetLaneX  = static_cast<FP16>(static_cast<FP16>(targetLane) * laneWidthFP);
+        
+        return fp_lerp(currentLaneX, targetLaneX, static_cast<uint8_t>(laneOffset));
     }
 };
 
