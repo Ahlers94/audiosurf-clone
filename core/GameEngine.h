@@ -3,6 +3,9 @@
 
 #include <stdint.h>
 
+// Forward declaration to ensure header self-containment without include loops
+struct NoteChart;
+
 // Mock types representing your Platform Abstraction Layer (PAL)
 namespace PAL {
     typedef uint16_t FP16;
@@ -28,6 +31,8 @@ namespace PAL {
         bool init();
         void play(uint8_t songId);
         void stop();
+        void setPaused(bool p);
+        bool isPaused(); // Hardening Hook: Essential for drift-resistant evaluation layers
         uint16_t getTrackProgress();
         uint8_t getEnergyLevel();
     };
@@ -36,6 +41,8 @@ namespace PAL {
         bool init();
         void poll();
         InputState readPressedActions();
+        InputState readHeldActions();
+        bool isHeld(InputAction a);
     };
 
     struct PlatformBundle {
@@ -64,25 +71,25 @@ enum class HoldState : uint8_t {
 // --- CACHE-ALIGNED PACKED STRUCTS ---
 
 struct alignas(4) Particle {
-    PAL::SFP16 posX;     // 2 bytes
-    PAL::SFP16 posY;     // 2 bytes
-    int16_t    velY;     // 2 bytes
-    uint8_t    lifetime; // 1 byte
-    uint8_t    colorIndex;// 1 byte
-};                       // Total: 8 bytes (Perfect 32-bit boundary)
+    PAL::SFP16 posX;        // 2 bytes
+    PAL::SFP16 posY;        // 2 bytes
+    int16_t    velY;        // 2 bytes
+    uint8_t    lifetime;    // 1 byte
+    uint8_t    colorIndex;  // 1 byte
+};                          // Total: 8 bytes (Perfect 32-bit boundary alignment)
 
 struct alignas(4) Note {
-    PAL::FP16 timeline;   // 2 bytes
-    uint16_t  holdLength; // 2 bytes
-    uint8_t   lane;       // 1 byte
-    uint8_t   flags;      // 1 byte
-    uint8_t   _padding[2];// 2 bytes (Hardware structure alignment padding)
-};                        // Total: 8 bytes
+    PAL::FP16 timeline;     // 2 bytes
+    uint16_t  holdLength;   // 2 bytes
+    uint8_t   lane;         // 1 byte
+    uint8_t   flags;        // 1 byte
+    uint8_t   _padding[2];  // 2 bytes (Hardware structure alignment padding)
+};                          // Total: 8 bytes
 
 struct alignas(2) NoteState {
-    uint8_t   hitResult;  // 1 byte
-    HoldState holdPhase;  // 1 byte
-};                        // Total: 2 bytes
+    uint8_t   hitResult;    // 1 byte
+    HoldState holdPhase;    // 1 byte
+};                          // Total: 2 bytes
 
 // --- CONFIGURATION CONSTANTS ---
 constexpr uint8_t  MAX_PARTICLES = 32;
@@ -96,7 +103,7 @@ constexpr uint16_t WINDOW_PERFECT = 0x0180;
 constexpr uint16_t WINDOW_GOOD    = 0x0400;
 constexpr uint16_t WINDOW_MISS    = 0x0600;
 
-constexpr uint8_t  BURST_COUNT  = 8;
+constexpr uint8_t  BURST_COUNT   = 8;
 constexpr uint8_t  PARTICLE_LIFE = 16;
 constexpr int16_t  PARTICLE_VEL_Y = -120;
 constexpr PAL::SFP16 LANE_HIT_Y = 400 << 8;
@@ -124,6 +131,7 @@ public:
     bool init(const PAL::PlatformBundle& bundle, uint8_t initialSongId);
     void tick();
     void render();
+    void shutdown() {} // Standard clear down hook mirroring main execution loops
     bool isRunning() const;
 
 private:
@@ -172,8 +180,6 @@ private:
     uint8_t     m_syncTickCounter = 0;
 
     // --- OPTIMIZED MATCH-3 BIT-PACKED BOARD MATRIX ---
-    // 3 lanes, each containing up to 6 rows. Each row type occupies 3 bits inside a uint16_t.
-    // Bits 0-2: Row 0, Bits 3-5: Row 1, Bits 6-8: Row 2, Bits 9-11: Row 3, Bits 12-14: Row 4, Bit 15: Overfill alert boundary
     uint16_t    m_puzzleGrid[3] = {0, 0, 0};
     uint8_t     m_gridHeights[3] = {0, 0, 0};
 
