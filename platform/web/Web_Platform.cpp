@@ -6,7 +6,7 @@
 
 #include <emscripten.h>
 #include <emscripten/html5.h>
-#include <GLES3/gl3.h> // Upgraded to real native GLES3 context headers
+#include <GLES3/gl3.h> // WebGL 2.0 Core bindings
 
 #include "../../pal/PAL.h"
 
@@ -41,14 +41,17 @@ static const char* s_frag_src = R"GLSL(#version 300 es
 // ---------------------------------------------------------------------------
 // Web_Graphics
 // ---------------------------------------------------------------------------
-class Web_GraphicsImpl : public GraphicsInterface
+class Web_GraphicsImpl final : public GraphicsInterface
 {
 public:
+    Web_GraphicsImpl() = default;
+    ~Web_GraphicsImpl() override = default;
+
     bool init(uint16_t w, uint16_t h) override
     {
         EmscriptenWebGLContextAttributes attr;
         emscripten_webgl_init_context_attributes(&attr);
-        attr.majorVersion = 2; // WebGL 2.0 Core Context Binding
+        attr.majorVersion = 2; // Enforce WebGL 2.0 Context Pipeline
         attr.minorVersion = 0;
         attr.alpha        = EM_FALSE;
         attr.depth        = EM_TRUE;
@@ -79,8 +82,7 @@ public:
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(prog);
 
-        // 2D Orthographic Projection Matrix: Maps spatial bounds [0..640]x[0..480] to NDC [-1..1]
-        // Left=0.0, Right=640.0, Bottom=0.0, Top=480.0, Near=-1.0, Far=1.0
+        // Standardized 2D Orthographic Matrix matching the shared layout footprint
         float orthoProjection[16] = {
             2.0f / 640.0f,  0.0f,           0.0f,  0.0f,
             0.0f,           2.0f / 480.0f,  0.0f,  0.0f,
@@ -91,6 +93,7 @@ public:
     }
 
     void endFrame() override {}
+    
     void shutdown() override 
     {
         glDeleteBuffers(1, &vbo);
@@ -101,14 +104,12 @@ public:
 
     void drawVoxelColumn(SFP16 xL, SFP16 xR, SFP16 yB, SFP16 yT, SFP16 z, uint8_t ci) override
     {
-        // Normal alpha blending pass for the solid track geometry
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         submitQuad(xL, xR, yB, yT, z, ci, 255);
     }
 
     void drawVoxelColumnGlow(SFP16 xL, SFP16 xR, SFP16 yB, SFP16 yT, SFP16 z, uint8_t ci, uint8_t alpha) override
     {
-        // Additive blending pass for the bloom overlay
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
         submitQuad(xL, xR, yB, yT, z, ci, alpha);
     }
@@ -116,7 +117,7 @@ public:
     void drawBlock(SFP16 x, SFP16 y, SFP16 z, uint8_t ci) override
     {
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-        SFP16 pad = 16 << 8; // Coordinate system padding matching fixed point scaling structures
+        SFP16 pad = 16 << 8; 
         submitQuad(static_cast<SFP16>(x - pad), static_cast<SFP16>(x + pad),
                    static_cast<SFP16>(y - pad), static_cast<SFP16>(y + pad), z, ci, 220);
     }
@@ -150,12 +151,15 @@ private:
 
     void submitQuad(SFP16 xL, SFP16 xR, SFP16 yB, SFP16 yT, SFP16 z, uint8_t ci, uint8_t alpha)
     {
-        // Unpack coordinates from standard Q8.8 fixed-point layouts
-        float fl = (static_cast<float>(xL) / 256.0f * 2.5f) + 80.0f;
-        float fr = (static_cast<float>(xR) / 256.0f * 2.5f) + 80.0f;
-        float fb = (static_cast<float>(yB) / 256.0f * 3.0f);
-        float ft = (static_cast<float>(yT) / 256.0f * 3.0f);
-        float fz = static_cast<float>(z)  / 256.0f;
+        // Unpack from standard Q8.8 fixed-point scaling limits (1/256 = 0.00390625f)
+        float fl = (static_cast<float>(xL) * 0.00390625f * 2.5f) + 80.0f;
+        float fr = (static_cast<float>(xR) * 0.00390625f * 2.5f) + 80.0f;
+        
+        // FIX: Invert the Y coordinates against screen height to neutralize WebGL's inverted viewport rules
+        float hF = static_cast<float>(screenH);
+        float fb = hF - (static_cast<float>(yB) * 0.00390625f * 3.0f);
+        float ft = hF - (static_cast<float>(yT) * 0.00390625f * 3.0f);
+        float fz = static_cast<float>(z)  * 0.00390625f;
 
         const RGBA& c = s_palette[ci % PALETTE_SIZE];
         glUniform4f(uColor, c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, alpha / 255.0f);
@@ -194,9 +198,12 @@ private:
 // ---------------------------------------------------------------------------
 // Web_Audio
 // ---------------------------------------------------------------------------
-class Web_AudioImpl : public AudioInterface
+class Web_AudioImpl final : public AudioInterface
 {
 public:
+    Web_AudioImpl() = default;
+    ~Web_AudioImpl() override = default;
+
     bool init() override
     {
         EM_ASM({
@@ -208,7 +215,6 @@ public:
             window._trackDur  = 1;
             window._audioProgress = 0;
 
-            // Connect your HTML5 element directly to your Web Audio node pipeline graph
             window._source = window._audioCtx.createMediaElementSource(window._audioEl);
             window._source.connect(window._analyser);
             window._analyser.connect(window._audioCtx.destination);
@@ -223,7 +229,6 @@ public:
             if (urls[$0]) {
                 window._audioEl.src = urls[$0];
                 
-                // Keep audio context synchronized with active browser windows
                 if (window._audioCtx.state === 'suspended') {
                     const unlock = () => {
                         window._audioCtx.resume().then(() => {
@@ -262,8 +267,12 @@ public:
 
     FP16 getTrackProgress() override
     {
-        double t   = EM_ASM_DOUBLE({ return window._audioEl.currentTime || 0; });
+        double t   = EM_ASM_DOUBLE({ return window._audioEl ? window._audioEl.currentTime : 0; });
         double dur = EM_ASM_DOUBLE({ return window._trackDur || 1; });
+        
+        // Protect calculations against early metadata loads
+        if (t <= 0.0 || dur <= 1.0) return 0;
+
         uint32_t prog = static_cast<uint32_t>((t / dur) * 65535.0);
         return static_cast<FP16>(prog & 0xFFFF);
     }
@@ -285,7 +294,7 @@ public:
 // ---------------------------------------------------------------------------
 // Web_Input
 // ---------------------------------------------------------------------------
-static volatile uint8_t s_keyStateAtomic = 0; // Guarded register against asynchronous racing updates
+static volatile uint8_t s_keyStateAtomic = 0; 
 static uint8_t s_keyStateCurr = 0;
 static uint8_t s_keyStatePrev = 0;
 
@@ -307,9 +316,12 @@ static EM_BOOL keyCallback(int eventType, const EmscriptenKeyboardEvent* e, void
     return EM_TRUE;
 }
 
-class Web_InputImpl : public InputInterface
+class Web_InputImpl final : public InputInterface
 {
 public:
+    Web_InputImpl() = default;
+    ~Web_InputImpl() override = default;
+
     bool init() override
     {
         emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, nullptr, EM_TRUE, keyCallback);
@@ -322,10 +334,12 @@ public:
     void poll() override
     {
         s_keyStatePrev = s_keyStateCurr;
-        s_keyStateCurr = s_keyStateAtomic; // Atomically lock intermediate frame register state
+        s_keyStateCurr = s_keyStateAtomic; 
     }
 
-    InputState readActions() override        { return s_keyStateCurr & ~s_keyStatePrev; }
+    // FIX: Implement explicit abstraction matching the revised PAL interface design parameters
+    InputState readPressedActions() override { return s_keyStateCurr & ~s_keyStatePrev; }
+    InputState readHeldActions() override    { return s_keyStateCurr; }
     bool       isHeld(InputAction a) override { return (s_keyStateCurr & static_cast<uint8_t>(a)) != 0; }
 };
 
