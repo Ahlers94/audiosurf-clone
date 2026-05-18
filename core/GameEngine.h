@@ -20,10 +20,18 @@ enum class HoldState : uint8_t {
 // Parallel array matching the ROM-resident Note layout; only mutable states live here.
 // 2 bytes × 512 entries = 1 KB — fits entirely inside a single SH-4 data-cache block.
 struct NoteState {
-    uint8_t   hitResult; // 0=pending, 1=perfect, 2=good, 3=miss, 4=ignored
+    uint8_t  hitResult; // 0=pending, 1=perfect, 2=good, 3=miss, 4=ignored
     HoldState holdPhase;
 };
 static_assert(sizeof(NoteState) == 2, "NoteState must be exactly 2 bytes");
+
+// ─── Streaming runtime judgment record ────────────────────────────────────────
+// Parallel array matching the ring buffer tracking footprint.
+struct StreamingNoteState {
+    uint8_t hitResult;
+    uint8_t padding; // Maintains 2-byte structure parity for aligned cache matching
+};
+static_assert(sizeof(StreamingNoteState) == 2, "StreamingNoteState must be exactly 2 bytes");
 
 // ─── Particle Structure ───────────────────────────────────────────────────────
 // 8 bytes (Aligned pair of 32-bit words) — fits two distinct slots per SH-4 cache line.
@@ -111,10 +119,31 @@ private:
     uint16_t m_combo     = 0;
     uint16_t m_missCount = 0;
 
-    // Encapsulated Stack Architecture State Buffers
+    // Static Album/Pre-Made Chart Buffers
     const NoteChart* m_activeChart = nullptr;
     NoteState        m_noteStates[MAX_NOTES_PER_CHART];
     uint16_t         m_readHead = 0;
+
+    // ─── HYBRID MATCH-3 & STREAMING CONFIGURATIONS ───────────────────────────
+    static constexpr uint8_t  GRID_MAX_ROWS      = 6;
+    static constexpr uint16_t GRID_BASE_Y        = 400 << 8; // Screen coordinate alignment anchor
+    static constexpr uint16_t GRID_BLOCK_SPACING = 16 << 8;  // Height delta spacing between stack rows
+    static constexpr uint8_t  CD_STREAM_TRACK_ID = 99;       // Song selection index flag forcing live CD route
+
+    static constexpr uint16_t RING_BUFFER_SIZE   = 128;      // Power of 2 required for fast bitmask operations
+    static constexpr uint16_t RING_BUFFER_MASK   = 0x007F;   // RING_BUFFER_SIZE - 1 wrap mask
+
+    bool     m_isStreamingMode = false;
+    uint16_t m_streamHead      = 0; // Read-index pointer boundary
+    uint16_t m_streamTail      = 0; // Write-index pointer boundary (driven by audio thread)
+
+    // Parallel ring arrays for dynamic CD note tracking
+    Note               m_streamingNotes[RING_BUFFER_SIZE];
+    StreamingNoteState m_streamingNoteStates[RING_BUFFER_SIZE];
+
+    // Array-backed Puzzle Board State Tracking Structures
+    uint8_t m_puzzleGrid[3][GRID_MAX_ROWS]; // Stores lane color blocks (1, 2, or 3=Grey)
+    uint8_t m_gridHeights[3];               // Current block count tracking per active lane
 
     // Contiguous Particle Stack Storage
     Particle m_particles[MAX_PARTICLES];
@@ -122,16 +151,19 @@ private:
     // Simulation Engine Functions (Write access boundaries to state tracking arrays)
     void loadChart(const NoteChart* chart);
     void resetScoreCounters();
+    void resetPuzzleGrid();
     void updateGameplaySimulation(PAL::InputState pressed);
 
     FrameResult evaluateChart(PAL::FP16 trackPos, PAL::InputState pressed);
+    bool pushBlockToGrid(uint8_t lane, uint8_t blockType);
+    void checkAndResolveMatches();
 
     void spawnBurst(uint8_t lane, uint8_t count);
     void tickParticles(); 
 
     // Render Generation Pipeline (Strictly Read-Only Constraints)
-    void renderParticles()     const; 
-    void renderTitleScreen()   const;
+    void renderParticles()      const; 
+    void renderTitleScreen()    const;
     void renderSongSelectMenu() const;
     void renderGameplayScene()  const; 
     void renderResultsScreen()  const;
