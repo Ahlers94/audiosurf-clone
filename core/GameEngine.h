@@ -2,7 +2,7 @@
 #define GAME_ENGINE_H
 
 #include "pal/PAL.h"
-#include "NoteChart.h" // Includes Note, NoteChart, and MAX_NOTES_PER_CHART definitions
+#include "charts/NoteChart.h" // Includes Note, NoteChart, and MAX_NOTES_PER_CHART definitions
 
 namespace Engine {
 
@@ -112,7 +112,8 @@ private:
     uint8_t     m_selectedSong = 0;
     bool        m_isRunning    = true;
 
-    static constexpr uint8_t TOTAL_SONGS = 3;
+    // 3 Fixed ROM Tracks + 1 Live Streaming Audio CD Track
+    static constexpr uint8_t TOTAL_SONGS = 4;
 
     // Gameplay Score Tracking Accumulators
     uint16_t m_score     = 0;
