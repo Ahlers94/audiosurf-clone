@@ -1,6 +1,7 @@
 // =============================================================================
 // GameEngine.h
 // The central engine class. Owns all gameplay state and drives the main loop.
+// Monolithic simulation container optimized for zero dynamic runtime allocation.
 // =============================================================================
 
 #pragma once
@@ -12,7 +13,7 @@
 namespace Engine {
 
 // ===========================================================================
-// Game state machine
+// Game State Machine
 // ===========================================================================
 enum class GameState : uint8_t
 {
@@ -23,7 +24,7 @@ enum class GameState : uint8_t
 };
 
 // ===========================================================================
-// Track generator config (Optimized for Q8.8 Grid Alignment)
+// Track Generator Configuration (Optimized for Q8.8 Grid Alignment)
 // ===========================================================================
 static constexpr uint8_t HEIGHT_MAX        = 12;   ///< Max voxel column height.
 static constexpr uint8_t HEIGHT_STEP_MAX   = 2;    ///< Max height delta between adjacent segs.
@@ -33,7 +34,7 @@ static constexpr uint16_t LANE_WIDTH_FP     = 48 << 8;
 static constexpr uint8_t  LANE_WIDTH_FP_INT = 48;   
 
 // Lane-slide speed: 32/256 ≈ 0.125 of a lane per tick.
-static constexpr FP16    LANE_SLIDE_SPEED  = 32;   
+static constexpr FP16    LANE_SLIDE_SPEED   = 32;   
 
 // ===========================================================================
 // GameEngine
@@ -42,6 +43,7 @@ class GameEngine
 {
 public:
     GameEngine() = default;
+    ~GameEngine() = default;
 
     /// Initialise engine with platform-specific implementations.
     bool init(PAL::PlatformBundle bundle, uint8_t songId)
@@ -53,7 +55,7 @@ public:
         if (!platform.audio->init())            return false;
         if (!platform.input->init())            return false;
 
-        // Reset all static pools — no heap touched.
+        // Reset all static pools — zero memory allocations touched.
         trackManager.reset();
         blockManager.reset();
         particleManager.reset();
@@ -64,11 +66,12 @@ public:
         running         = true;
         generatorSeed   = 0xCAFEBABEu;
 
-        // Pre-generate the first segments so geometry exists instantly
-        for (uint8_t i = 0; i < LOOK_AHEAD_SEGMENTS; ++i)
+        // Pre-generate the initial look-ahead slices so geometry exists instantly
+        for (uint8_t i = 0; i < LOOK_AHEAD_SEGMENTS; ++i) {
             generateSegment(i);
+        }
 
-        // Start audio — from this point getTrackProgress() is the clock.
+        // Start audio — from this point getTrackProgress() is the master clock.
         platform.audio->play(songId);
         state = GameState::Playing;
         return true;
@@ -100,10 +103,10 @@ public:
             handlePlayingInput(actions);
         } else if (state == GameState::Paused) {
             handlePausedInput(actions);
-            return; // Halt engine physics during pause state
+            return; // Freeze game logic and physics while paused
         }
 
-        // 3. LANE-SLIDE INTERPOLATION (Q8.8 arithmetic)
+        // 3. FIXED-POINT LANE-SLIDE INTERPOLATION
         if (player.lane != player.targetLane) {
             player.laneOffset = static_cast<FP16>(player.laneOffset + LANE_SLIDE_SPEED);
             if (player.laneOffset >= FP_ONE) {
@@ -112,7 +115,7 @@ public:
             }
         }
 
-        // 4. PROCEDURAL TRACK GENERATION (Ring-buffer look-ahead)
+        // 4. PROCEDURAL TRACK GENERATION (Circular Ring-Buffer Look-Ahead)
         uint8_t curIdx = fp_block_index(globalTrackPos);
         for (uint8_t i = 1; i <= LOOK_AHEAD_SEGMENTS; ++i) {
             uint8_t genIdx = static_cast<uint8_t>(curIdx + i); // Explicitly wraps at 255
@@ -122,7 +125,7 @@ public:
             }
         }
 
-        // Retire historic segments behind the cursor
+        // Clean up and retire old track segments that fall behind the camera viewport
         uint8_t retireIdx = static_cast<uint8_t>(curIdx - 2); 
         trackManager.segments[retireIdx].reset(); 
 
@@ -137,22 +140,22 @@ public:
                 player.score += static_cast<uint32_t>(collected) * player.combo;
                 if (player.combo < 255) ++player.combo;
 
-                // Position calculation matching hardware scaling offsets
+                // Spatially align the particle burst origins with the block lanes
                 SFP16 bx = static_cast<SFP16>(blockManager.blocks[i].lane * LANE_WIDTH_FP_INT);
                 particleManager.burst(bx, 0, 0,
                                       blockManager.blocks[i].colorIndex,
-                                      /*count=*/12, /*lifetime=*/30);
+                                      12, 30);
             }
         }
 
-        // 6. PARTICLE TICK (Euler Integer Integration)
+        // 6. PARTICLE PHYSICS SYSTEM TICK (Euler Integer Integration)
         particleManager.update();
 
-        // 7. CAMERA UPDATE (Float conversion occurs downstream inside PAL)
+        // 7. CAMERA POSITION SYNCHRONIZATION
         platform.graphics->updateCamera(globalTrackPos, player.renderX(LANE_WIDTH_FP));
     }
 
-    /// Platform-agnostic rendering call stack
+    /// Platform-agnostic rendering engine call stack
     void render()
     {
         if (!running && state != GameState::GameOver) return;
@@ -173,7 +176,7 @@ public:
                 SFP16 xLeft  = static_cast<SFP16>(col       * LANE_WIDTH_FP_INT);
                 SFP16 xRight = static_cast<SFP16>((col + 1) * LANE_WIDTH_FP_INT);
 
-                // Safe linear interpolation across ring boundaries
+                // Linearly interpolate block heights across track segments
                 uint8_t nextSegIdx = static_cast<uint8_t>(segIdx + 1);
                 uint8_t h0 = seg.heightMap[col];
                 uint8_t h1 = trackManager.segments[nextSegIdx].heightMap[col];
@@ -186,17 +189,17 @@ public:
                 uint8_t ci    = seg.colorMap[col];
                 uint8_t glowAlpha = seg.energyLevel >> 1;
 
-                // --- PASS 1: Neon Glow Overlay ---
+                // --- PASS 1: Neon Glow Background ---
                 SFP16 glowPad = static_cast<SFP16>(FP_HALF / 2); 
                 platform.graphics->drawVoxelColumnGlow(
                     static_cast<SFP16>(xLeft  - glowPad),
                     static_cast<SFP16>(xRight + glowPad),
                     static_cast<SFP16>(yBottom - glowPad),
                     static_cast<SFP16>(yTop    + glowPad),
-                    ci, glowAlpha);
+                    segZ, ci, glowAlpha);
 
-                // --- PASS 2: Solid Voxel Column ---
-                platform.graphics->drawVoxelColumn(xLeft, xRight, yBottom, yTop, ci);
+                // --- PASS 2: Solid Track Geometry Mesh ---
+                platform.graphics->drawVoxelColumn(xLeft, xRight, yBottom, yTop, segZ, ci);
             }
         }
 
@@ -208,7 +211,7 @@ public:
             platform.graphics->drawBlock(bx, FP_ONE, 0, b.colorIndex);
         }
 
-        // --- PASS 4: Burst Particles ---
+        // --- PASS 4: Particle Systems ---
         for (uint16_t i = 0; i < PARTICLE_POOL_SIZE; ++i) {
             const Particle& p = particleManager.particles[i];
             if (!p.isActive) continue;
@@ -216,7 +219,7 @@ public:
             platform.graphics->drawParticle(p.x, p.y, p.z, p.colorIndex, alpha);
         }
 
-        // --- PASS 5: Screen Text / HUD Overlay ---
+        // --- PASS 5: Core HUD Overlay Display text ---
         platform.graphics->drawHUD(player.score, player.combo, 8, 8);
         platform.graphics->endFrame();
     }
@@ -237,13 +240,13 @@ private:
         if (actions & static_cast<uint8_t>(A::LaneLeft)) {
             if (player.targetLane > 0) {
                 player.targetLane--;
-                player.laneOffset = 0; 
+                // Note: player.laneOffset resets inside the physics clock loop, not here
             }
         }
         if (actions & static_cast<uint8_t>(A::LaneRight)) {
             if (player.targetLane < LANE_COUNT - 1) {
                 player.targetLane++;
-                player.laneOffset = 0;
+                // Note: player.laneOffset resets inside the physics clock loop, not here
             }
         }
         if (actions & static_cast<uint8_t>(A::Pause)) {
@@ -269,17 +272,16 @@ private:
         VoxelSegment& seg = trackManager.segments[segIdx];
         seg.energyLevel = platform.audio->getEnergyLevel();
 
-        // Safe continuous wrapping evaluation for structural ring-buffer
         uint8_t prevIdx = static_cast<uint8_t>(segIdx - 1);
         bool hasHistory = trackManager.segments[prevIdx].isActive;
 
         for (uint8_t col = 0; col < TRACK_WIDTH_VOXELS; ++col) {
-            // High-velocity LCG
+            // Highly-optimized LCG pseudorandom transformation algorithm
             generatorSeed = generatorSeed * 1664525u + 1013904223u;
             
-            // Branchless division-free mapping for height delta
+            // Branchless mapping limits maximum height deltas without execution divergence
             int8_t rawMod = static_cast<int8_t>((generatorSeed >> 24) & 0x07); 
-            if (rawMod > 4) rawMod = 2; // Constrain bounds without costly raw modulo loops
+            if (rawMod > 4) rawMod = 2; 
             int8_t delta = static_cast<int8_t>(rawMod - HEIGHT_STEP_MAX);
 
             uint8_t prevH = hasHistory ? trackManager.segments[prevIdx].heightMap[col] : (HEIGHT_MAX / 2);
@@ -296,7 +298,7 @@ private:
         const VoxelSegment& seg = trackManager.segments[segIdx];
         if ((seg.energyLevel >> 4) < 6) return;
 
-        // Shift-left safely re-constructs the target track position context
+        // Shift-left operations accurately map target timeline coordinates
         FP16 segTrackPos = static_cast<FP16>(static_cast<uint16_t>(segIdx) << 8);
 
         generatorSeed = generatorSeed * 1664525u + 1013904223u;
