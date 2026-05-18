@@ -2,8 +2,78 @@
 #define GAME_ENGINE_H
 
 #include "pal/PAL.h"
+#include "NoteChart.h" // Includes Note, NoteChart, and MAX_NOTES_PER_CHART definitions
 
 namespace Engine {
+
+// ─── Hold-gate state machine ──────────────────────────────────────────────────
+// Strictly forward tracking: Inactive → Gating → Complete | DroppedEarly.
+// No back-edges allowed; a dropped hold cannot recover within the same track timeline.
+enum class HoldState : uint8_t {
+    Inactive     = 0, // Tap note, or hold duration onset not yet reached
+    Gating       = 1, // Lane button held down — gate is open, score accumulating
+    Complete     = 2, // Maintained cleanly through the full holdLength span — success
+    DroppedEarly = 3  // Lane released early before holdLength elapsed — miss register
+};
+
+// ─── Per-note runtime judgment record ─────────────────────────────────────────
+// Parallel array matching the ROM-resident Note layout; only mutable states live here.
+// 2 bytes × 512 entries = 1 KB — fits entirely inside a single SH-4 data-cache block.
+struct NoteState {
+    uint8_t   hitResult; // 0=pending, 1=perfect, 2=good, 3=miss, 4=ignored
+    HoldState holdPhase;
+};
+static_assert(sizeof(NoteState) == 2, "NoteState must be exactly 2 bytes");
+
+// ─── Particle Structure ───────────────────────────────────────────────────────
+// 8 bytes (Aligned pair of 32-bit words) — fits two distinct slots per SH-4 cache line.
+// posX/posY are signed Q8.8 screen-space coordinates.
+struct alignas(4) Particle {
+    PAL::SFP16 posX;
+    PAL::SFP16 posY;
+    int16_t    velY;
+    uint8_t    lifetime;
+    uint8_t    colorIndex; // Indexes into lane palette directories
+};
+static_assert(sizeof(Particle) == 8, "Particle must be exactly 8 bytes");
+
+// ─── Frame-level judgment summary ─────────────────────────────────────────────
+struct FrameResult {
+    uint8_t perfectCount;
+    uint8_t goodCount;
+    uint8_t missCount;
+    uint8_t holdDropCount;
+    uint8_t activeHolds;
+};
+
+// ─── Judgment windows (unsigned Q8.8 FP16 timeline deltas) ───────────────────
+static constexpr PAL::FP16 WINDOW_PERFECT = 0x0010; // ±~0.06 timeline units
+static constexpr PAL::FP16 WINDOW_GOOD    = 0x0028; // ±~0.15 timeline units
+static constexpr PAL::FP16 WINDOW_MISS    = 0x0050; // Forced-miss boundary threshold
+
+// ─── Particle pool constants ──────────────────────────────────────────────────
+static constexpr uint8_t MAX_PARTICLES  = 32;
+static constexpr uint8_t BURST_COUNT    = 6;
+static constexpr uint8_t PARTICLE_LIFE  = 16;   // Clean power-of-two to avoid division stalls
+// Base upward velocity: -1.5 px/frame in Q8.8 format
+static constexpr int16_t PARTICLE_VEL_Y = -0x0180;
+
+// ─── Lane geometry (screen-space Q8.8 SFP16 configuration) ────────────────────
+static constexpr PAL::SFP16 LANE_X[4] = {
+    static_cast<PAL::SFP16>(100 << 8),
+    static_cast<PAL::SFP16>(220 << 8),
+    static_cast<PAL::SFP16>(340 << 8),
+    static_cast<PAL::SFP16>(460 << 8),
+};
+static constexpr PAL::SFP16 LANE_HIT_Y = static_cast<PAL::SFP16>(400 << 8);
+
+// ─── Bitwise lane-to-button mask index catalog ──────────────────────────────
+static constexpr PAL::InputState LANE_MASKS[4] = {
+    static_cast<PAL::InputState>(PAL::InputAction::LaneLeft),
+    static_cast<PAL::InputState>(PAL::InputAction::LaneRight),
+    static_cast<PAL::InputState>(PAL::InputAction::LaneUp),
+    static_cast<PAL::InputState>(PAL::InputAction::LaneDown),
+};
 
 enum class EngineState : uint8_t {
     TitleScreen,
@@ -12,34 +82,10 @@ enum class EngineState : uint8_t {
     ResultsScreen
 };
 
-// --- TIMING JUDGMENT REGISTER SCHEMES ---
-enum class Judgment : uint8_t { Pending, Perfect, Good, Miss, Ignored };
-enum class HoldState : uint8_t { Inactive, Holding, ReleasedEarly, Complete };
-
-// --- HARD PACKED STRUCT SEGMENTATION (8-Bytes, 32-Bit Aligned Boundary) ---
-struct alignas(4) Note {
-    PAL::FP16  timeline;    // [0x0000 -> 0xFFFF] Unsigned Q8.8 Track Position
-    PAL::FP16  holdLength;  // 0x0000 = Tap Note, >0 = Sustained Hold Delta Gate
-    uint8_t    lane;        // 0 to 3 Mapping (Left, Right, Up, Down)
-    uint8_t    flags;       // Bitwise: Bit 0 = Accented, Bit 1 = Kinetic Modifier
-    uint8_t    _reserved[2];// Clean zero pad protecting SH-4 compiler alignment
-};
-
-struct NoteState {
-    Judgment  hitResult;    // Operational tracking status
-    HoldState holdPhase;    // Active phase tracking mechanics
-};
-
-struct NoteChart {
-    const Note* notes;
-    uint16_t    noteCount;
-    uint8_t     songId;
-    uint8_t     bpmHint;
-};
-
+// ─── GameEngine Main Class Architecture ───────────────────────────────────────
 class GameEngine {
 public:
-    GameEngine() = default;
+    GameEngine()  = default;
     ~GameEngine() = default;
 
     bool init(const PAL::PlatformBundle& bundle, uint8_t initialSongId);
@@ -48,40 +94,50 @@ public:
     bool isRunning() const;
 
 private:
+    // PAL Layer Target Interfaces
     PAL::GraphicsInterface* s_graphics = nullptr;
-    PAL::AudioInterface*    s_audio    = nullptr;
-    PAL::InputInterface*    s_input    = nullptr;
+    PAL::AudioInterface* s_audio    = nullptr;
+    PAL::InputInterface* s_input    = nullptr;
 
+    // Core System Status Regs
     EngineState m_currentState = EngineState::TitleScreen;
     uint8_t     m_selectedSong = 0;
     bool        m_isRunning    = true;
 
     static constexpr uint8_t TOTAL_SONGS = 3;
-    static constexpr uint8_t MAX_LANES   = 4;
-    static constexpr uint16_t MAX_NOTES_PER_CHART = 512;
 
-    // --- ENCAPSULATED WORKING GAMEPLAY STATE SEGMENTS ---
+    // Gameplay Score Tracking Accumulators
+    uint16_t m_score     = 0;
+    uint16_t m_combo     = 0;
+    uint16_t m_missCount = 0;
+
+    // Encapsulated Stack Architecture State Buffers
     const NoteChart* m_activeChart = nullptr;
     NoteState        m_noteStates[MAX_NOTES_PER_CHART];
     uint16_t         m_readHead = 0;
 
-    // Game Metrics Tracking
-    uint32_t m_score     = 0;
-    uint16_t m_combo     = 0;
-    uint16_t m_missCount = 0;
+    // Contiguous Particle Stack Storage
+    Particle m_particles[MAX_PARTICLES];
 
-    // Deterministic Timing Windows (Calculated in Unsigned Q8.8 Format)
-    static constexpr PAL::FP16 WINDOW_PERFECT = 0x00A0; // ~60ms
-    static constexpr PAL::FP16 WINDOW_GOOD    = 0x0140; // ~120ms
-    static constexpr PAL::FP16 WINDOW_MISS    = 0x0200; // ~180ms Boundary Threshold
-
+    // Simulation Engine Functions (Write access boundaries to state tracking arrays)
+    void loadChart(const NoteChart* chart);
+    void resetScoreCounters();
     void updateGameplaySimulation(PAL::InputState pressed);
-    void resetGameplayTrack(uint8_t songId);
 
-    void renderTitleScreen();
-    void renderSongSelectMenu();
-    void renderGameplayScene();
-    void renderResultsScreen();
+    FrameResult evaluateChart(PAL::FP16 trackPos, PAL::InputState pressed);
+
+    void spawnBurst(uint8_t lane, uint8_t count);
+    void tickParticles(); 
+
+    // Render Generation Pipeline (Strictly Read-Only Constraints)
+    void renderParticles()     const; 
+    void renderTitleScreen()   const;
+    void renderSongSelectMenu() const;
+    void renderGameplayScene()  const; 
+    void renderResultsScreen()  const;
+
+    // Hardware Optimized Math Utilities
+    static PAL::FP16 fp16AbsDelta(PAL::FP16 a, PAL::FP16 b);
 };
 
 } // namespace Engine
