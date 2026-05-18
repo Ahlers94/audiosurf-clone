@@ -92,7 +92,11 @@ public:
         glUniformMatrix4fv(uMVP, 1, GL_FALSE, orthoProjection);
     }
 
-    void endFrame() override {}
+    void endFrame() override 
+    { 
+        // Force an execution flush of the WebGL 2.0 command queue to the browser canvas
+        glFlush(); 
+    }
     
     void shutdown() override 
     {
@@ -155,7 +159,7 @@ private:
         float fl = (static_cast<float>(xL) * 0.00390625f * 2.5f) + 80.0f;
         float fr = (static_cast<float>(xR) * 0.00390625f * 2.5f) + 80.0f;
         
-        // FIX: Invert the Y coordinates against screen height to neutralize WebGL's inverted viewport rules
+        // Invert the Y coordinates against screen height to neutralize WebGL's inverted viewport rules
         float hF = static_cast<float>(screenH);
         float fb = hF - (static_cast<float>(yB) * 0.00390625f * 3.0f);
         float ft = hF - (static_cast<float>(yT) * 0.00390625f * 3.0f);
@@ -306,7 +310,7 @@ static EM_BOOL keyCallback(int eventType, const EmscriptenKeyboardEvent* e, void
     else if (e->keyCode == 39 || e->keyCode == 68) bit = static_cast<uint8_t>(A::LaneRight);
     else if (e->keyCode == 27)                    bit = static_cast<uint8_t>(A::Pause);
     else if (e->keyCode == 13)                    bit = static_cast<uint8_t>(A::Confirm);
-    else if (e->keyCode == 8)                     bit = static_cast<uint8_t>(A::Back);
+    else if (e->keyCode == 8)                      bit = static_cast<uint8_t>(A::Back);
 
     if (eventType == EMSCRIPTEN_EVENT_KEYDOWN) {
         s_keyStateAtomic |= bit;
@@ -337,7 +341,6 @@ public:
         s_keyStateCurr = s_keyStateAtomic; 
     }
 
-    // FIX: Implement explicit abstraction matching the revised PAL interface design parameters
     InputState readPressedActions() override { return s_keyStateCurr & ~s_keyStatePrev; }
     InputState readHeldActions() override    { return s_keyStateCurr; }
     bool       isHeld(InputAction a) override { return (s_keyStateCurr & static_cast<uint8_t>(a)) != 0; }
@@ -362,22 +365,46 @@ void destroyPlatform(PlatformBundle&) {}
 } // namespace Engine
 
 // ---------------------------------------------------------------------------
-// main.cpp
+// Native Emscripten Web Execution Loop Hook
 // ---------------------------------------------------------------------------
 static Engine::GameEngine s_engine;
+static Engine::PAL::PlatformBundle s_bundle;
 
 static void webMainLoop()
 {
+    // 1. Process simulation parameters (physics, hit frames, matrices)
     s_engine.tick();
+
+    // 2. Clear buffers and construct vertex/buffer stream layouts 
     s_engine.render();
-    if (!s_engine.isRunning())
+
+    // 3. Post-VBL execution swap equivalent:
+    // Emscripten's main loop inherently handles the requestAnimationFrame synchronization.
+    // We execute our explicit endFrame flush right here to safely paint the compiled GL pixels.
+    if (s_bundle.graphics) {
+        s_bundle.graphics->endFrame();
+    }
+
+    // Terminate application loop hooks cleanly if engine yields
+    if (!s_engine.isRunning()) {
+        s_engine.shutdown();
+        Engine::PAL::destroyPlatform(s_bundle);
         emscripten_cancel_main_loop();
+    }
 }
 
 int main()
 {
-    Engine::PAL::PlatformBundle bundle = Engine::PAL::createPlatform();
-    if (!s_engine.init(bundle, /*songId=*/0)) return 1;
+    // Allocate global storage pointers securely across execution ticks
+    s_bundle = Engine::PAL::createPlatform();
+    
+    if (!s_engine.init(s_bundle, /*songId=*/0)) {
+        Engine::PAL::destroyPlatform(s_bundle);
+        return 1;
+    }
+    
+    // Set up native browser frame loop. Specifying 0 leverages requestAnimationFrame,
+    // which binds the game loop directly to the user's monitor refresh rate (60Hz default).
     emscripten_set_main_loop(webMainLoop, 0, 1);
     return 0;
 }
