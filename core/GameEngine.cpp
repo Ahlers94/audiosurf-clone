@@ -1,18 +1,12 @@
 #include "GameEngine.h"
-#include "charts/SongIndex.h" // Provides linkage to: extern const NoteChart* kSongTable[TOTAL_SONGS];
+#include "charts/SongIndex.h"
 
 namespace Engine {
 
-// =============================================================================
-// MOTOROLA/SH-4 OPTIMIZED FIXED-POINT MATH REGISTER UTILITIES
-// =============================================================================
-
-PAL::FP16 GameEngine::fp16AbsDelta(PAL::FP16 a, PAL::FP16 b) {
-    // Branchless delta execution to guarantee pipeline performance boundaries
-    int32_t d = static_cast<int32_t>(a) - static_cast<int32_t>(b);
-    if (d < 0) d = -d;
-    return static_cast<PAL::FP16>(d & 0xFFFF);
-}
+// Zero-allocation lookup array to instantly resolve fading opacity variables
+static const uint8_t kAlphaLUT[17] = {
+    0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 255
+};
 
 // =============================================================================
 // PLATFORM CONFIGURATION INITIALIZATION & STATE REBOOT LAYERS
@@ -31,24 +25,25 @@ bool GameEngine::init(const PAL::PlatformBundle& bundle, uint8_t initialSongId) 
     m_currentState = EngineState::TitleScreen;
     m_selectedSong = initialSongId;
 
-    // Flush the particle array buffer cells cleanly
     for (uint8_t i = 0; i < MAX_PARTICLES; ++i) {
         m_particles[i].lifetime = 0;
     }
 
-    // Initialize Puzzle Board State Matrix to Empty
     resetPuzzleGrid();
 
-    m_isRunning = true; // Secure explicit operational state state loop boundary
+    m_lastHardwareTrackPos = 0;
+    m_localTrackAccumulator = 0;
+    m_syncTickCounter = 0;
+    m_isRunning = true;
+    
     return true;
 }
 
 void GameEngine::loadChart(const NoteChart* chart) {
     m_activeChart = chart;
     m_readHead    = 0;
-    m_isStreamingMode = (chart == nullptr); // Nullptr means we are processing a live CD-DA audio stream
+    m_isStreamingMode = (chart == nullptr);
 
-    // Reset ring buffer bounds for live procedural tracking
     m_streamHead = 0;
     m_streamTail = 0;
 
@@ -70,12 +65,8 @@ void GameEngine::resetScoreCounters() {
 }
 
 void GameEngine::resetPuzzleGrid() {
-    for (uint8_t lane = 0; lane < 3; ++lane) {
-        m_gridHeights[lane] = 0;
-        for (uint8_t row = 0; row < GRID_MAX_ROWS; ++row) {
-            m_puzzleGrid[lane][row] = 0; // 0 = Empty cell
-        }
-    }
+    m_puzzleGrid[0] = 0; m_puzzleGrid[1] = 0; m_puzzleGrid[2] = 0;
+    m_gridHeights[0] = 0; m_gridHeights[1] = 0; m_gridHeights[2] = 0;
 }
 
 // =============================================================================
@@ -83,13 +74,12 @@ void GameEngine::resetPuzzleGrid() {
 // =============================================================================
 
 void GameEngine::spawnBurst(uint8_t lane, uint8_t count) {
-    if (lane >= 3) return; // Restrict strictly to valid puzzle board lane arrays
+    if (lane >= 3) return; 
     uint8_t spawned = 0;
 
     for (uint8_t i = 0; i < MAX_PARTICLES && spawned < count; ++i) {
         if (m_particles[i].lifetime != 0) continue;
 
-        // Fanned horizontal coordinate positioning calculated purely via shifts
         const int16_t xSpread = static_cast<int16_t>((static_cast<int16_t>(i % 7) - 3) << 5);
 
         m_particles[i].posX       = static_cast<PAL::SFP16>(LANE_X[lane] + xSpread);
@@ -111,27 +101,22 @@ void GameEngine::tickParticles() {
 }
 
 // =============================================================================
-// PUZZLE MATCHING ENGINE CORE (Zero-Allocation Array-Backed Matrix Logic)
+// BIT-PACKED NIBBLE MATCHING MATRIX SYSTEM (High-Efficiency Execution)
 // =============================================================================
 
 bool GameEngine::pushBlockToGrid(uint8_t lane, uint8_t blockType) {
-    if (lane >= 3) return false;
+    if (lane >= 3 || blockType == 0) return false;
+    uint8_t height = m_gridHeights[lane];
 
-    // Handle Grey Obstacles clogging up the grid architecture directly
-    if (blockType == 3) {
-        if (m_gridHeights[lane] < GRID_MAX_ROWS) {
-            m_puzzleGrid[lane][m_gridHeights[lane]] = 3;
-            ++m_gridHeights[lane];
-        }
-        return (m_gridHeights[lane] >= GRID_MAX_ROWS); // Returns true if overfilled
-    }
+    if (height >= GRID_MAX_ROWS) return true; // Column Overflowed
 
-    // Normal Color Block Stack Placement
-    if (m_gridHeights[lane] < GRID_MAX_ROWS) {
-        m_puzzleGrid[lane][m_gridHeights[lane]] = blockType;
-        ++m_gridHeights[lane];
-        
-        // Scan matrix for Match-3 instances instantly upon column cell adjustment
+    // Inject block value into targeted 3-bit slot position segment
+    uint16_t shiftAmount = height * 3;
+    m_puzzleGrid[lane] |= (static_cast<uint16_t>(blockType & 0x07) << shiftAmount);
+    m_gridHeights[lane]++;
+
+    // Scan matrix configuration immediately unless block is an obstacle block
+    if (blockType != 3) {
         checkAndResolveMatches();
     }
 
@@ -140,54 +125,65 @@ bool GameEngine::pushBlockToGrid(uint8_t lane, uint8_t blockType) {
 
 void GameEngine::checkAndResolveMatches() {
     bool foundMatch = false;
-    bool marked[3][6] = { {false} };
+    uint8_t markedMasks[3] = {0, 0, 0}; // Individual bits 0-5 track cells flagged for erasure
 
-    // 1. Scan Vertical Stacks for 3-in-a-row
+    // Unpack board lane variables cleanly to read types
+    uint8_t unpackedGrid[3][6];
+    for (uint8_t l = 0; l < 3; ++l) {
+        uint16_t currentLaneData = m_puzzleGrid[l];
+        for (uint8_t r = 0; r < m_gridHeights[l]; ++r) {
+            unpackedGrid[l][r] = (currentLaneData >> (r * 3)) & 0x07;
+        }
+    }
+
+    // 1. Scan Vertical Lanes
     for (uint8_t l = 0; l < 3; ++l) {
         if (m_gridHeights[l] < 3) continue;
         for (uint8_t r = 0; r <= m_gridHeights[l] - 3; ++r) {
-            uint8_t color = m_puzzleGrid[l][r];
-            if (color == 0 || color == 3) continue; // Skip empty and grey blocks
-            if (m_puzzleGrid[l][r+1] == color && m_puzzleGrid[l][r+2] == color) {
-                marked[l][r] = true;   marked[l][r+1] = true; marked[l][r+2] = true;
+            uint8_t color = unpackedGrid[l][r];
+            if (color == 0 || color == 3) continue;
+            if (unpackedGrid[l][r+1] == color && unpackedGrid[l][r+2] == color) {
+                markedMasks[l] |= (7 << r); // Sets consecutive bits for match span row positions
                 foundMatch = true;
             }
         }
     }
 
-    // 2. Scan Horizontal Lanes for 3-in-a-row
+    // 2. Scan Horizontal Rows
     for (uint8_t r = 0; r < GRID_MAX_ROWS; ++r) {
-        uint8_t color = m_puzzleGrid[0][r];
+        if (m_gridHeights[0] <= r || m_gridHeights[1] <= r || m_gridHeights[2] <= r) continue;
+        uint8_t color = unpackedGrid[0][r];
         if (color == 0 || color == 3) continue;
-        if (m_puzzleGrid[1][r] == color && m_puzzleGrid[2][r] == color) {
-            marked[0][r] = true; marked[1][r] = true; marked[2][r] = true;
+        if (unpackedGrid[1][r] == color && unpackedGrid[2][r] == color) {
+            markedMasks[0] |= (1 << r);
+            markedMasks[1] |= (1 << r);
+            markedMasks[2] |= (1 << r);
             foundMatch = true;
         }
     }
 
-    // 3. Clear Blocks and Compress Stacks Downward (Shift Elimination)
+    // 3. Bitwise Column Compression
     if (foundMatch) {
-        uint8_t clearedCount = 0;
+        uint8_t totalCleared = 0;
         for (uint8_t l = 0; l < 3; ++l) {
+            if (markedMasks[l] == 0) continue;
+
+            uint16_t newLaneVal = 0;
             uint8_t writeIdx = 0;
             for (uint8_t r = 0; r < m_gridHeights[l]; ++r) {
-                if (marked[l][r]) {
-                    ++clearedCount;
-                    continue; // Erase cell via skip omission
+                if (markedMasks[l] & (1 << r)) {
+                    ++totalCleared;
+                    continue; // Purge block by skipping insertion index updates
                 }
-                m_puzzleGrid[l][writeIdx] = m_puzzleGrid[l][r];
+                newLaneVal |= (static_cast<uint16_t>(unpackedGrid[l][r]) << (writeIdx * 3));
                 ++writeIdx;
             }
-            // Clear out leftover top cells
-            for (uint8_t r = writeIdx; r < m_gridHeights[l]; ++r) {
-                m_puzzleGrid[l][r] = 0;
-            }
+            m_puzzleGrid[l] = newLaneVal;
             m_gridHeights[l] = writeIdx;
         }
 
-        // Apply scoring mechanics directly into the frame counters
-        m_score += static_cast<uint16_t>(clearedCount * 500u * (m_combo > 0 ? (m_combo >> 2) + 1 : 1));
-        spawnBurst(1, clearedCount * 2); // Explode center stage particles on clear
+        m_score += static_cast<uint16_t>(totalCleared * 500u * (m_combo > 0 ? (m_combo >> 2) + 1 : 1));
+        spawnBurst(1, totalCleared * 2);
     }
 }
 
@@ -199,12 +195,8 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
     FrameResult result = {0, 0, 0, 0, 0};
 
     if (m_isStreamingMode) {
-        // ─────────────────────────────────────────────────────────────────────
-        // STREAMING MODE PATHWAY: PROCESS RING BUFFER NOTES
-        // ─────────────────────────────────────────────────────────────────────
         if (m_streamHead == m_streamTail) return result;
 
-        // Pass 1: Reaper check for out-of-bounds streaming blocks
         if (trackPos > WINDOW_MISS) {
             const PAL::FP16 missFloor = static_cast<PAL::FP16>(trackPos - WINDOW_MISS);
             while (m_streamHead != m_streamTail) {
@@ -212,14 +204,13 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
                 if (m_streamingNotes[headIdx].timeline >= missFloor) break;
                 
                 if (m_streamingNoteStates[headIdx].hitResult == 0) {
-                    m_streamingNoteStates[headIdx].hitResult = 3; // Miss
+                    m_streamingNoteStates[headIdx].hitResult = 3; 
                     ++result.missCount;
                 }
                 ++m_streamHead;
             }
         }
 
-        // Pass 2: Lookahead Evaluation scan through Active Ring elements
         const uint16_t scanLimit = m_streamTail;
         for (uint16_t i = m_streamHead; i != scanLimit; ++i) {
             uint16_t idx = i & RING_BUFFER_MASK;
@@ -237,15 +228,12 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
                     state.hitResult = 1;
                     ++result.perfectCount;
                     spawnBurst(note.lane, BURST_COUNT);
-                    
-                    // Route to Match-3 matrix board layout
                     bool crashed = pushBlockToGrid(note.lane, note.flags); 
-                    if (crashed) ++result.holdDropCount; // Overfill penalization
+                    if (crashed) ++result.holdDropCount;
                 } else if (delta <= WINDOW_GOOD) {
                     state.hitResult = 2;
                     ++result.goodCount;
                     spawnBurst(note.lane, BURST_COUNT / 2u);
-                    
                     bool crashed = pushBlockToGrid(note.lane, note.flags);
                     if (crashed) ++result.holdDropCount;
                 }
@@ -254,9 +242,6 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
         return result;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // STATIC ALBUM PATHWAY: CLASSIC FORWARD CHART VECTOR SCANNER
-    // ─────────────────────────────────────────────────────────────────────
     if (!m_activeChart) return result;
 
     const uint16_t noteCount = (m_activeChart->noteCount < MAX_NOTES_PER_CHART)
@@ -279,8 +264,7 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
     }
 
     const uint32_t  lookAheadRaw = static_cast<uint32_t>(trackPos) + WINDOW_GOOD;
-    const PAL::FP16 lookAhead    = (lookAheadRaw > 0xFFFFu)
-                                  ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(lookAheadRaw);
+    const PAL::FP16 lookAhead    = (lookAheadRaw > 0xFFFFu) ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(lookAheadRaw);
 
     for (uint16_t i = m_readHead; i < noteCount; ++i) {
         const Note& note  = m_activeChart->notes[i];
@@ -299,7 +283,7 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
                     state.hitResult = 1;
                     ++result.perfectCount;
                     spawnBurst(note.lane, BURST_COUNT);
-                    pushBlockToGrid(note.lane, note.flags); // Process match-3 mechanics
+                    pushBlockToGrid(note.lane, note.flags);
                 } else if (delta <= WINDOW_GOOD) {
                     state.hitResult = 2;
                     ++result.goodCount;
@@ -310,7 +294,6 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
             continue;
         }
 
-        // Sustain Hold Evaluation Blocks
         switch (state.holdPhase) {
             case HoldState::Inactive:
                 if (laneBit && delta <= WINDOW_GOOD) {
@@ -322,8 +305,7 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
 
             case HoldState::Gating: {
                 const uint32_t holdEndRaw = static_cast<uint32_t>(note.timeline) + note.holdLength;
-                const PAL::FP16 holdEnd   = (holdEndRaw > 0xFFFFu)
-                                            ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(holdEndRaw);
+                const PAL::FP16 holdEnd   = (holdEndRaw > 0xFFFFu) ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(holdEndRaw);
 
                 if (trackPos >= holdEnd) {
                     state.holdPhase = HoldState::Complete;
@@ -348,16 +330,26 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos, PAL::InputState presse
 }
 
 void GameEngine::updateGameplaySimulation(PAL::InputState pressed) {
-    const PAL::FP16 trackPos = static_cast<PAL::FP16>(s_audio->getTrackProgress());
+    // --- DRIFT-RESISTANT COUNTER SYNCHRONIZATION HARDENING LAYER ---
+    m_syncTickCounter++;
+    
+    // Sub-query system: Only query hardware clock bounds once every 4 frames
+    if ((m_syncTickCounter & 0x03) == 0) {
+        uint16_t hardwarePos = s_audio->getTrackProgress();
+        m_localTrackAccumulator = static_cast<PAL::FP16>(hardwarePos);
+    } else {
+        // Linearly step internal clock estimation using 60Hz frame pacing ticks (approx 0x0440 out of 0xFFFF scale bounds)
+        uint32_t predictedTrack = static_cast<uint32_t>(m_localTrackAccumulator) + 0x0440u;
+        m_localTrackAccumulator = (predictedTrack > 0xFFFFu) ? static_cast<PAL::FP16>(0xFFFF) : static_cast<PAL::FP16>(predictedTrack);
+    }
 
-    if (trackPos >= 0xFFFF) {
+    if (m_localTrackAccumulator >= 0xFFFF) {
         s_audio->stop();
         m_currentState = EngineState::ResultsScreen;
         return;
     }
 
-    // Call our unified, hybrid calculation loop
-    const FrameResult fr = evaluateChart(trackPos, pressed);
+    const FrameResult fr = evaluateChart(m_localTrackAccumulator, pressed);
 
     const uint8_t totalHits  = fr.perfectCount + fr.goodCount;
     const uint8_t totalMiss  = fr.missCount    + fr.holdDropCount;
@@ -366,7 +358,6 @@ void GameEngine::updateGameplaySimulation(PAL::InputState pressed) {
     m_combo      = (totalMiss > 0) ? 0u : static_cast<uint16_t>(m_combo + totalHits);
     m_missCount += totalMiss;
 
-    // Tick layout particle updates safely on simulation borders
     tickParticles();
 }
 
@@ -391,15 +382,11 @@ void GameEngine::tick() {
                 if (m_selectedSong < (TOTAL_SONGS - 1)) ++m_selectedSong;
             }
             if (pressed & static_cast<PAL::InputState>(PAL::InputAction::Confirm)) {
-                
-                // If checking an official album track, load the normal chart list.
-                // If selecting an external CD mode, pass nullptr to trigger streaming.
                 if (m_selectedSong == CD_STREAM_TRACK_ID) {
                     loadChart(nullptr); 
                 } else {
                     loadChart(kSongTable[m_selectedSong]);
                 }
-                
                 resetScoreCounters();
                 s_audio->play(m_selectedSong);
                 m_currentState = EngineState::Gameplay;
@@ -439,7 +426,8 @@ void GameEngine::renderParticles() const {
     for (uint8_t i = 0; i < MAX_PARTICLES; ++i) {
         if (m_particles[i].lifetime == 0) continue;
 
-        const uint8_t alpha = static_cast<uint8_t>((static_cast<uint16_t>(m_particles[i].lifetime) * 255u) >> 4);
+        // Optimized zero-overhead table indexing step
+        const uint8_t alpha = kAlphaLUT[m_particles[i].lifetime & 0x0F];
 
         s_graphics->drawParticle(
             m_particles[i].posX, m_particles[i].posY,
@@ -450,11 +438,9 @@ void GameEngine::renderParticles() const {
 }
 
 void GameEngine::renderGameplayScene() const {
-    const PAL::FP16 trackPos = static_cast<PAL::FP16>(s_audio->getTrackProgress());
     const uint8_t energy = s_audio->getEnergyLevel();
 
-    // Promote rendering timeline bounds to uint32 to prevent 16-bit wrap-around clipping
-    const uint32_t viewLookAheadRaw = static_cast<uint32_t>(trackPos) + 0x1C00u;
+    const uint32_t viewLookAheadRaw = static_cast<uint32_t>(m_localTrackAccumulator) + 0x1C00u;
     const uint16_t viewLookAhead    = (viewLookAheadRaw > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(viewLookAheadRaw);
 
     // ── 1. Draw Voxel Highway Footprint Corridor ─────────────────────────────
@@ -467,11 +453,11 @@ void GameEngine::renderGameplayScene() const {
 
     // ── 2. Draw Match-3 Matrix Grid Blocks (Bottom HUD Stack Display) ────────
     for (uint8_t l = 0; l < 3; ++l) {
+        uint16_t laneData = m_puzzleGrid[l];
         for (uint8_t r = 0; r < m_gridHeights[l]; ++r) {
-            uint8_t cellType = m_puzzleGrid[l][r];
+            uint8_t cellType = (laneData >> (r * 3)) & 0x07;
             if (cellType == 0) continue;
 
-            // Render block layers stacked upwards from the bottom base board coordinates
             PAL::SFP16 gridX = LANE_X[l];
             PAL::SFP16 gridY = static_cast<PAL::SFP16>(GRID_BASE_Y - (r * GRID_BLOCK_SPACING));
             s_graphics->drawBlock(gridX, gridY, static_cast<PAL::SFP16>(1 << 8), cellType);
@@ -490,7 +476,7 @@ void GameEngine::renderGameplayScene() const {
             if (note.timeline > viewLookAhead) break;
 
             if (m_streamingNoteStates[idx].hitResult == 0) {
-                int32_t delta = static_cast<int32_t>(note.timeline) - static_cast<int32_t>(trackPos);
+                int32_t delta = static_cast<int32_t>(note.timeline) - static_cast<int32_t>(m_localTrackAccumulator);
                 PAL::SFP16 visualZ = static_cast<PAL::SFP16>((delta * 24) >> 8);
                 PAL::SFP16 targetY = LANE_HIT_Y - (visualZ << 2) + (energy << 3);
 
@@ -506,7 +492,7 @@ void GameEngine::renderGameplayScene() const {
         while (scanIdx < noteCount && m_activeChart->notes[scanIdx].timeline <= viewLookAhead) {
             if (m_noteStates[scanIdx].hitResult == 0) {
                 const Note& note = m_activeChart->notes[scanIdx];
-                int32_t delta = static_cast<int32_t>(note.timeline) - static_cast<int32_t>(trackPos);
+                int32_t delta = static_cast<int32_t>(note.timeline) - static_cast<int32_t>(m_localTrackAccumulator);
                 PAL::SFP16 visualZ = static_cast<PAL::SFP16>((delta * 24) >> 8);
                 PAL::SFP16 targetY = LANE_HIT_Y - (visualZ << 2) + (energy << 3);
 
