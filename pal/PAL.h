@@ -1,5 +1,5 @@
 // =============================================================================
-// PAL.h  —  Platform Abstraction Layer
+// PAL.h   —  Platform Abstraction Layer
 // Pure abstract C++ interfaces that firewall all game logic from hardware.
 //
 // RULE: Platform macros MUST NOT appear outside of an implementation file.
@@ -30,11 +30,11 @@ struct Color32
 enum class InputAction : uint8_t
 {
     None      = 0,
-    LaneLeft  = (1 << 0),  ///< Shift one lane left.
-    LaneRight = (1 << 1),  ///< Shift one lane right.
-    Pause     = (1 << 2),  ///< Toggle pause menu.
-    Confirm   = (1 << 3),  ///< Menu confirm / select.
-    Back      = (1 << 4),  ///< Menu back / cancel.
+    LaneLeft  = (1 << 0),  ///< Shift one lane left (Edge triggered).
+    LaneRight = (1 << 1),  ///< Shift one lane right (Edge triggered).
+    Pause     = (1 << 2),  ///< Toggle pause menu (Edge triggered).
+    Confirm   = (1 << 3),  ///< Menu confirm / select (Edge triggered).
+    Back      = (1 << 4),  ///< Menu back / cancel (Edge triggered).
 };
 
 /// Bitfield mask definition for clean input action evaluations.
@@ -45,12 +45,11 @@ using InputState = uint8_t;
 // ===========================================================================
 class GraphicsInterface
 {
-protected:
-    /// Protected non-virtual destructor blocks dynamic delete operations,
-    /// completely stripping dynamic allocation overhead from the linked binary.
-    ~GraphicsInterface() = default;
-
 public:
+    /// Virtual destructor guarantees safe cleanup of physical VRAM and hardware 
+    /// display pipelines when tearing down static objects polymorphically.
+    virtual ~GraphicsInterface() = default;
+
     // -----------------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------------
@@ -64,7 +63,6 @@ public:
     // -----------------------------------------------------------------------
     
     /// Draw one column voxel segment geometry using Q8.8 world coordinates.
-    /// z represents the segment distance depth along the track timeline.
     virtual void drawVoxelColumn(
         SFP16 xLeft, SFP16 xRight,
         SFP16 yBottom, SFP16 yTop, SFP16 z,
@@ -91,15 +89,18 @@ public:
 // ===========================================================================
 class AudioInterface
 {
-protected:
-    ~AudioInterface() = default;
-
 public:
+    virtual ~AudioInterface() = default;
+
     virtual bool init() = 0;
     virtual bool play(uint8_t songId) = 0;
     virtual void setPaused(bool paused) = 0;
     virtual void stop() = 0;
+    
+    /// Returns the raw physical hardware playback position.
     virtual FP16 getTrackProgress() = 0;
+    
+    /// Returns current audio energy analysis metrics for real-time tracking loops.
     virtual uint8_t getEnergyLevel() = 0;
     virtual void shutdown() = 0;
 };
@@ -109,13 +110,22 @@ public:
 // ===========================================================================
 class InputInterface
 {
-protected:
-    ~InputInterface() = default;
-
 public:
+    virtual ~InputInterface() = default;
+
     virtual bool init() = 0;
+    
+    /// Poll hardware controller states and compute edge transitions.
     virtual void poll() = 0;
-    virtual InputState readActions() = 0;
+    
+    /// Returns actions that were pressed down EXACTLY this frame (Edge-Triggered).
+    /// Used for precise lane shifts and menus.
+    virtual InputState readPressedActions() = 0;
+    
+    /// Returns the full continuous bitmask of all held keys (State-Triggered).
+    virtual InputState readHeldActions() = 0;
+    
+    /// Direct status utility check.
     virtual bool isHeld(InputAction action) = 0;
     virtual void shutdown() = 0;
 };
