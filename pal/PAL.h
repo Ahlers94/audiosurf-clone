@@ -25,16 +25,18 @@ struct Color32
 };
 
 // ===========================================================================
-// Input Actions & Type Definitions
+// Input Actions & Type Definitions (Updated for 4-Lane Matrix Matching)
 // ===========================================================================
 enum class InputAction : uint8_t
 {
     None      = 0,
-    LaneLeft  = (1 << 0),  ///< Shift one lane left (Edge triggered).
-    LaneRight = (1 << 1),  ///< Shift one lane right (Edge triggered).
-    Pause     = (1 << 2),  ///< Toggle pause menu (Edge triggered).
-    Confirm   = (1 << 3),  ///< Menu confirm / select (Edge triggered).
-    Back      = (1 << 4),  ///< Menu back / cancel (Edge triggered).
+    LaneLeft  = (1 << 0),  ///< Track Lane 0 Activation (Edge triggered)
+    LaneRight = (1 << 1),  ///< Track Lane 1 Activation (Edge triggered)
+    LaneUp    = (1 << 2),  ///< Track Lane 2 Activation (Edge triggered)
+    LaneDown  = (1 << 3),  ///< Track Lane 3 Activation (Edge triggered)
+    Pause     = (1 << 4),  ///< Toggle pause menu (Edge triggered)
+    Confirm   = (1 << 5),  ///< Menu confirm / select (Edge triggered)
+    Back      = (1 << 6),  ///< Menu back / cancel (Edge triggered)
 };
 
 /// Bitfield mask definition for clean input action evaluations.
@@ -136,8 +138,8 @@ public:
 struct PlatformBundle
 {
     GraphicsInterface* graphics = nullptr;
-    AudioInterface*    audio    = nullptr;
-    InputInterface*    input    = nullptr;
+    AudioInterface* audio    = nullptr;
+    InputInterface* input    = nullptr;
 };
 
 // ===========================================================================
