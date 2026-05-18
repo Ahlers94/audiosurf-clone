@@ -36,16 +36,22 @@ int main(int argc, char** argv)
     dbglog(DBG_INFO, "[DREAMSURF] Initialization successful. Entering 60Hz execution loop.\n");
 
     // 3. HARDWARE-SYNCHRONIZED GAME LOOP ENVIRONMENT
+    // Establish optimal pipeline structure: Compute -> Wait For Blanking -> Flush To PVR
     while (s_engine.isRunning()) {
-        // Run core simulation math calculations and build the upcoming graphic scene 
-        // display lists during the display's active raster generation pass.
+        
+        // Force the Maple bus driver to harvest peripheral inputs immediately before physics compilation
+        maple_poll();
+
+        // Compute simulation state parameters and pack hardware display lists
+        // during the display's active raster generation pass.
         s_engine.tick();
 
         // Halt SH-4 execution threads until the cathode-ray beam hits the vertical blank interval.
         // This naturally throttles engine cycles to a rock-solid 60Hz.
         vid_waitvbl();
 
-        // Instantly flush the prepared display lists down the system bus to the PowerVR chip.
+        // Instantly flush the prepared display lists down the system bus to the PowerVR chip
+        // exactly at the onset of the vertical blanking window.
         s_engine.render();
     }
 
