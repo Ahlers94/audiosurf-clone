@@ -314,7 +314,7 @@ void GameEngine::tickParticles() {
 // Render Methods
 // -----------------------------------------------------------------------------
 
-void GameEngine::renderGameplayScene() const {
+void GameEngine::renderGameplayScene() {
     const uint8_t energy = s_audio->getEnergyLevel();
 
     // Camera spring: smoothly chase the track position
