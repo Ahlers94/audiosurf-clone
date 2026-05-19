@@ -174,9 +174,9 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos,
         const uint16_t mask  = isStreaming ? RING_BUFFER_MASK : 0xFFFF;
         const uint16_t limit = isStreaming
             ? tail
-            : (m_activeChart->noteCount < MAX_NOTES_PER_CHART
+            : (m_activeChart->noteCount < Engine::Engine::Engine::MAX_NOTES_PER_CHART
                ? m_activeChart->noteCount
-               : MAX_NOTES_PER_CHART);
+               : Engine::Engine::Engine::MAX_NOTES_PER_CHART);
 
         // Mark past-window notes as misses
         if (trackPos > WINDOW_MISS) {
@@ -382,9 +382,9 @@ void GameEngine::renderGameplayScene() {
         renderNotes(m_streamHead, m_streamTail, true);
     else if (m_activeChart)
         renderNotes(m_readHead,
-                    m_activeChart->noteCount < MAX_NOTES_PER_CHART
+                    m_activeChart->noteCount < Engine::Engine::Engine::MAX_NOTES_PER_CHART
                     ? m_activeChart->noteCount
-                    : MAX_NOTES_PER_CHART,
+                    : Engine::Engine::MAX_NOTES_PER_CHART,
                     false);
 
     // Render puzzle grid (right-side panel)
