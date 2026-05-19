@@ -1,6 +1,6 @@
 # Audiosurf Clone — Cross-Platform Neon Voxel Engine
 
-A lean *Audiosurf* / *Rez*-aesthetic clone targeting both **Sega Dreamcast** (KallistiOS) and **modern browsers** (Emscripten/WebAssembly), built around strict data-oriented design, fixed-point arithmetic, and a hard no-heap-allocation policy during gameplay.
+A lean *Audiosurf* / *Geometry Wars*-aesthetic clone targeting both **Sega Dreamcast** (KallistiOS) and **modern browsers** (Emscripten/WebAssembly), built around strict data-oriented design, fixed-point arithmetic, and a hard no-heap-allocation policy during gameplay.
 
 ---
 
