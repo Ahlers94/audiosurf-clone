@@ -14,7 +14,6 @@ namespace Engine {
 constexpr uint8_t  MAX_PARTICLES        = 16;
 constexpr uint8_t  TOTAL_SONGS          = 5;
 constexpr uint8_t  CD_STREAM_TRACK_ID   = 255;
-constexpr uint16_t MAX_NOTES_PER_CHART  = 256;
 constexpr uint16_t RING_BUFFER_MASK     = 0x00FF;   // 256-entry ring
 constexpr uint16_t STREAMING_NOTES_MAX  = 256;       // must be power of 2
 constexpr PAL::FP16 WINDOW_MISS         = 0x0500;
