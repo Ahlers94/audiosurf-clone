@@ -15,6 +15,20 @@
 namespace Engine {
 
 // -----------------------------------------------------------------------------
+// Constant definitions (declared extern in GameEngine.h)
+// -----------------------------------------------------------------------------
+
+const PAL::SFP16 LANE_X[3] = {
+    static_cast<PAL::SFP16>(160 << 8),
+    static_cast<PAL::SFP16>(320 << 8),
+    static_cast<PAL::SFP16>(480 << 8)
+};
+
+const PAL::SFP16 LANE_HIT_Y = static_cast<PAL::SFP16>(380 << 8);
+
+const uint8_t LANE_MASKS[3] = { 0x01, 0x02, 0x04 };
+
+// -----------------------------------------------------------------------------
 // Initialization
 // -----------------------------------------------------------------------------
 
@@ -87,10 +101,10 @@ void GameEngine::render() {
     s_graphics->beginFrame();
 
     switch (m_currentState) {
-        case EngineState::TitleScreen:    renderTitleScreen();    break;
-        case EngineState::SongSelect:     renderSongSelectMenu(); break;
-        case EngineState::Gameplay:       renderGameplayScene();  break;
-        case EngineState::ResultsScreen:  renderResultsScreen();  break;
+        case EngineState::TitleScreen:   renderTitleScreen();    break;
+        case EngineState::SongSelect:    renderSongSelectMenu(); break;
+        case EngineState::Gameplay:      renderGameplayScene();  break;
+        case EngineState::ResultsScreen: renderResultsScreen();  break;
     }
 
     s_graphics->endFrame();
@@ -102,7 +116,7 @@ void GameEngine::shutdown() {
     if (s_graphics) s_graphics->shutdown();
     if (s_audio)    s_audio->shutdown();
     if (s_input)    s_input->shutdown();
-    
+
     m_isRunning = false;
 }
 
@@ -136,8 +150,7 @@ void GameEngine::updateGameplaySimulation(PAL::InputState pressed) {
     });
 
     if (audioTime > 0.0) {
-        // Ensure we don't divide by zero if audioDur is somehow 0
-        double ratio = audioTime / (audioDur > 0 ? audioDur : 1.0);
+        double ratio    = audioTime / (audioDur > 0.0 ? audioDur : 1.0);
         uint32_t truePos = static_cast<uint32_t>(ratio * 65535.0);
         m_localTrackAccumulator = static_cast<PAL::FP16>(truePos);
     }
@@ -168,26 +181,30 @@ void GameEngine::updateGameplaySimulation(PAL::InputState pressed) {
 
 FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos,
                                       PAL::InputState /*pressed*/) {
-    FrameResult result = {0, 0, 0, 0, 0};
+    // FIX 1: Struct has exactly 3 members — initializer list matches.
+    FrameResult result = {0, 0, 0};
 
     auto processNotes = [&](uint16_t head, uint16_t tail, bool isStreaming) {
-        const uint16_t mask  = isStreaming ? RING_BUFFER_MASK : 0xFFFF;
+        const uint16_t mask = isStreaming ? RING_BUFFER_MASK : 0xFFFF;
+
+        // FIX 2: Use plain MAX_NOTES_PER_CHART — we are already inside
+        //        namespace Engine, so no extra qualification is needed.
         const uint16_t limit = isStreaming
             ? tail
-            : (m_activeChart->noteCount < Engine::Engine::Engine::MAX_NOTES_PER_CHART
+            : (m_activeChart->noteCount < MAX_NOTES_PER_CHART
                ? m_activeChart->noteCount
-               : Engine::Engine::Engine::MAX_NOTES_PER_CHART);
+               : MAX_NOTES_PER_CHART);
 
         // Mark past-window notes as misses
         if (trackPos > WINDOW_MISS) {
             const PAL::FP16 missFloor =
                 static_cast<PAL::FP16>(trackPos - WINDOW_MISS);
             for (uint16_t i = head; i != limit; ++i) {
-                uint16_t idx        = isStreaming ? (i & mask) : i;
-                const Note& note    = isStreaming ? m_streamingNotes[idx]
-                                                  : m_activeChart->notes[idx];
-                NoteState& state    = isStreaming ? m_streamingNoteStates[idx]
-                                                  : m_noteStates[idx];
+                uint16_t    idx  = isStreaming ? (i & mask) : i;
+                const Note& note = isStreaming ? m_streamingNotes[idx]
+                                              : m_activeChart->notes[idx];
+                NoteState&  state = isStreaming ? m_streamingNoteStates[idx]
+                                               : m_noteStates[idx];
                 if (note.timeline >= missFloor) break;
                 if (state.hitResult == 0) {
                     state.hitResult = 3;
@@ -198,14 +215,14 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos,
 
         // Evaluate notes inside the hit window
         for (uint16_t i = head; i != limit; ++i) {
-            uint16_t idx     = isStreaming ? (i & mask) : i;
+            uint16_t    idx  = isStreaming ? (i & mask) : i;
             const Note& note = isStreaming ? m_streamingNotes[idx]
-                                           : m_activeChart->notes[idx];
-            NoteState& state = isStreaming ? m_streamingNoteStates[idx]
+                                          : m_activeChart->notes[idx];
+            NoteState&  state = isStreaming ? m_streamingNoteStates[idx]
                                            : m_noteStates[idx];
 
-            if (note.timeline > trackPos)  break;
-            if (state.hitResult != 0)      continue;
+            if (note.timeline > trackPos) break;
+            if (state.hitResult != 0)     continue;
 
             if (m_shipLane == note.lane) {
                 state.hitResult = 1;
@@ -220,8 +237,8 @@ FrameResult GameEngine::evaluateChart(PAL::FP16 trackPos,
         }
     };
 
-    if (m_isStreamingMode)        processNotes(m_streamHead, m_streamTail, true);
-    else if (m_activeChart)       processNotes(m_readHead, 0, false);
+    if (m_isStreamingMode)  processNotes(m_streamHead, m_streamTail, true);
+    else if (m_activeChart) processNotes(m_readHead, 0, false);
 
     return result;
 }
@@ -246,8 +263,8 @@ bool GameEngine::pushBlockToGrid(uint8_t lane, uint8_t blockType) {
 }
 
 void GameEngine::checkAndResolveMatches() {
-    bool    foundMatch       = false;
-    uint8_t markedMasks[3]   = {0, 0, 0};
+    bool    foundMatch     = false;
+    uint8_t markedMasks[3] = {0, 0, 0};
     uint8_t unpackedGrid[3][6];
 
     // Unpack the bit-packed grid into a plain 2-D array for readability
@@ -301,8 +318,8 @@ void GameEngine::checkAndResolveMatches() {
                 (static_cast<uint16_t>(unpackedGrid[l][r]) << (writeIdx * 3));
             ++writeIdx;
         }
-        m_puzzleGrid[l]    = newLaneVal;
-        m_gridHeights[l]   = writeIdx;
+        m_puzzleGrid[l]  = newLaneVal;
+        m_gridHeights[l] = writeIdx;
     }
 
     m_score += static_cast<uint16_t>(
@@ -318,6 +335,7 @@ void GameEngine::tickParticles() {
     for (uint8_t i = 0; i < MAX_PARTICLES; ++i) {
         if (m_particles[i].lifetime == 0) continue;
         --m_particles[i].lifetime;
+        // FIX 3: Use posY / velY, matching the Particle struct in the header.
         m_particles[i].posY =
             static_cast<PAL::SFP16>(m_particles[i].posY + m_particles[i].velY);
     }
@@ -348,15 +366,15 @@ void GameEngine::renderGameplayScene() {
     // Lambda: render visible, unhit notes in perspective
     auto renderNotes = [&](uint16_t scanIdx, uint16_t limit, bool streaming) {
         while (scanIdx != limit) {
-            uint16_t    idx  = streaming ? (scanIdx & RING_BUFFER_MASK) : scanIdx;
-            const Note& n    = streaming ? m_streamingNotes[idx]
-                                         : m_activeChart->notes[idx];
+            uint16_t    idx = streaming ? (scanIdx & RING_BUFFER_MASK) : scanIdx;
+            const Note& n   = streaming ? m_streamingNotes[idx]
+                                        : m_activeChart->notes[idx];
 
             if (n.timeline > viewLookAhead) break;
 
             bool alreadyHit = streaming
                 ? (m_streamingNoteStates[idx].hitResult != 0)
-                : (m_noteStates[idx].hitResult != 0);
+                : (m_noteStates[idx].hitResult        != 0);
 
             if (!alreadyHit) {
                 int32_t zDist =
@@ -381,10 +399,11 @@ void GameEngine::renderGameplayScene() {
     if (m_isStreamingMode)
         renderNotes(m_streamHead, m_streamTail, true);
     else if (m_activeChart)
+        // FIX 4: Plain MAX_NOTES_PER_CHART — no erroneous namespace nesting.
         renderNotes(m_readHead,
-                    m_activeChart->noteCount < Engine::Engine::Engine::MAX_NOTES_PER_CHART
+                    m_activeChart->noteCount < MAX_NOTES_PER_CHART
                     ? m_activeChart->noteCount
-                    : Engine::Engine::MAX_NOTES_PER_CHART,
+                    : MAX_NOTES_PER_CHART,
                     false);
 
     // Render puzzle grid (right-side panel)
