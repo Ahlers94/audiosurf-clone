@@ -98,6 +98,14 @@ void GameEngine::render() {
 
 bool GameEngine::isRunning() const { return m_isRunning; }
 
+void GameEngine::shutdown() {
+    if (s_graphics) s_graphics->shutdown();
+    if (s_audio)    s_audio->shutdown();
+    if (s_input)    s_input->shutdown();
+    
+    m_isRunning = false;
+}
+
 // -----------------------------------------------------------------------------
 // Gameplay Simulation
 // -----------------------------------------------------------------------------
