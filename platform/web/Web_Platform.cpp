@@ -226,6 +226,10 @@ public:
         return true;
     }
 
+    bool isPaused() const override {
+        return EM_ASM_INT({ return window._audioEl.paused ? 1 : 0; }) != 0;
+    }
+
     bool play(uint8_t songId) override
     {
         EM_ASM({
@@ -363,9 +367,6 @@ private:
     AudioInterface* m_audio;
 };
 // Static instances for stable lifecycle
-static Web_GraphicsImpl s_graphics;
-static Web_AudioImpl    s_audio;
-static Web_InputImpl    s_input;
 static Web_Clock        s_clock(&s_audio); // Initialize with audio ref
 
 PlatformBundle createPlatform()
