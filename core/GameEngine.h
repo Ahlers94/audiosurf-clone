@@ -38,11 +38,11 @@ struct alignas(4) Particle {
 };
 
 struct alignas(4) Note {
-    Engine::PAL::FP16  timeline;
-    uint16_t           holdLength;
-    uint8_t            lane;
-    uint8_t            flags;
-    uint8_t            _padding[2];
+    Engine::PAL::FP16   timeline;
+    uint16_t            holdLength;
+    uint8_t             lane;
+    uint8_t             flags;
+    uint8_t             _padding[2];
 };
 
 struct alignas(2) NoteState {
@@ -117,34 +117,38 @@ private:
         return static_cast<Engine::PAL::FP16>((d ^ (d >> 31)) - (d >> 31));
     }
 
+    // --- PAL INTERFACES ---
     Engine::PAL::GraphicsInterface* s_graphics = nullptr;
-    Engine::PAL::AudioInterface* s_audio    = nullptr;
-    Engine::PAL::InputInterface* s_input    = nullptr;
+    Engine::PAL::AudioInterface*    s_audio    = nullptr;
+    Engine::PAL::InputInterface*    s_input    = nullptr;
+    Engine::PAL::ClockInterface*    s_clock    = nullptr; // Integrated PAL Clock
 
+    // --- ENGINE STATE ---
     EngineState m_currentState = EngineState::TitleScreen;
-    uint8_t      m_selectedSong = 0;
-    bool         m_isRunning    = false;
-    bool         m_isStreamingMode = false;
+    uint8_t     m_selectedSong = 0;
+    bool        m_isRunning    = false;
+    bool        m_isStreamingMode = false;
     
-    uint32_t     m_score     = 0;
-    uint16_t     m_combo     = 0;
-    uint16_t     m_missCount = 0;
+    uint32_t    m_score     = 0;
+    uint16_t    m_combo     = 0;
+    uint16_t    m_missCount = 0;
 
-    // --- AUDIO LOOP CLOCK HARDENING REGISTERS ---
-    Engine::PAL::FP16   m_lastHardwareTrackPos = 0;
+    // --- CLOCK & CAMERA REGISTERS ---
     Engine::PAL::FP16   m_localTrackAccumulator = 0;
-    Engine::PAL::FP16   m_cameraZ = 0; // CAMERA INERTIA REGISTER
-    uint8_t             m_syncTickCounter = 0;
+    Engine::PAL::FP16   m_cameraZ = 0; 
 
+    // --- PUZZLE STATE ---
     uint32_t    m_puzzleGrid[3] = {0, 0, 0};
     uint8_t     m_gridHeights[3] = {0, 0, 0};
 
+    // --- CHART DATA ---
     const NoteChart* m_activeChart = nullptr;
     uint16_t         m_readHead    = 0;
     
     NoteState        m_noteStates[MAX_NOTES_PER_CHART];
     Particle         m_particles[MAX_PARTICLES];
 
+    // --- STREAMING BUFFER ---
     uint16_t         m_streamHead = 0;
     uint16_t         m_streamTail = 0;
     Note             m_streamingNotes[RING_BUFFER_SIZE];
