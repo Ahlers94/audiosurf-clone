@@ -350,15 +350,33 @@ static Web_GraphicsImpl s_graphics;
 static Web_AudioImpl    s_audio;
 static Web_InputImpl    s_input;
 
+class Web_Clock final : public ClockInterface {
+public:
+    explicit Web_Clock(AudioInterface* audio) : m_audio(audio) {}
+    
+    FP16 getCurrentTime() override {
+        // The Web_Clock delegates to the Web_AudioImpl's progress tracking.
+        // This ensures the "clock" is perfectly synced with the HTML5 audio element.
+        return m_audio->getTrackProgress();
+    }
+private:
+    AudioInterface* m_audio;
+};
+// Static instances for stable lifecycle
+static Web_GraphicsImpl s_graphics;
+static Web_AudioImpl    s_audio;
+static Web_InputImpl    s_input;
+static Web_Clock        s_clock(&s_audio); // Initialize with audio ref
+
 PlatformBundle createPlatform()
 {
     PlatformBundle b;
     b.graphics = &s_graphics;
     b.audio    = &s_audio;
     b.input    = &s_input;
+    b.clock    = &s_clock; // Now populated
     return b;
 }
-
 void destroyPlatform(PlatformBundle&) {}
 
 } // namespace PAL
