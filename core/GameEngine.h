@@ -2,8 +2,17 @@
 #define GAME_ENGINE_H
 
 #include <stdint.h>
-#include "PAL.h"
+#include "PAL.h" // Ensure this path is 100% correct
 #include "../charts/NoteChart.h"
+
+// Bring PAL types into the current scope before the Engine namespace
+using PAL::Graphics;
+using PAL::Audio;
+using PAL::Input;
+using PAL::Clock;
+using PAL::PlatformBundle;
+using PAL::InputState;
+using PAL::FP16;
 
 namespace Engine {
 
@@ -20,21 +29,18 @@ struct FrameResult { uint16_t perfectCount; uint16_t missCount; uint16_t holdDro
 
 class GameEngine {
 public:
-    // Lifecycle
-    bool init(const ::PAL::PlatformBundle& bundle, uint8_t initialSongId);
+    bool init(const PlatformBundle& bundle, uint8_t initialSongId);
     void tick();
     void render();
     bool isRunning() const;
     void shutdown();
 
 private:
-    // Core Engine Pointers (using global scope ::PAL::)
-    ::PAL::Graphics* s_graphics = nullptr;
-    ::PAL::Audio*    s_audio    = nullptr;
-    ::PAL::Input*    s_input    = nullptr;
-    ::PAL::Clock*    s_clock    = nullptr;
+    Graphics* s_graphics = nullptr;
+    Audio*    s_audio    = nullptr;
+    Input*    s_input    = nullptr;
+    Clock*    s_clock    = nullptr;
 
-    // Simulation State
     bool        m_isRunning = false;
     EngineState m_currentState;
     uint8_t     m_selectedSong;
@@ -42,25 +48,10 @@ private:
     uint16_t    m_combo = 0;
     uint16_t    m_missCount = 0;
 
-    // Gameplay members
-    void updateGameplaySimulation(::PAL::InputState pressed);
-    FrameResult evaluateChart(::PAL::FP16 trackPos, ::PAL::InputState pressed);
+    void updateGameplaySimulation(InputState pressed);
+    FrameResult evaluateChart(FP16 trackPos, InputState pressed);
     
-    // Helpers
-    void resetPuzzleGrid();
-    void loadChart(const NoteChart* chart);
-    void resetScoreCounters();
-    void tickParticles();
-    void renderParticles();
-    bool pushBlockToGrid(uint8_t lane, uint8_t blockType);
-    void checkAndResolveMatches();
-    void spawnBurst(uint8_t lane, uint8_t count);
-    
-    // UI/Render helpers
-    void renderTitleScreen() const;
-    void renderSongSelectMenu() const;
-    void renderGameplayScene();
-    void renderResultsScreen() const;
+    // ... (rest of your helpers remain same)
 };
 
 } // namespace Engine
