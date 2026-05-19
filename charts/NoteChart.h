@@ -2,7 +2,7 @@
 #define NOTE_CHART_H
 
 #include <cstdint>
-#include "pal/FixedPoint.h"
+#include "FixedPoint.h"
 
 namespace Engine {
 
