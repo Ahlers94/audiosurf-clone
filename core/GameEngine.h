@@ -7,9 +7,8 @@
 #define GAME_ENGINE_H
 
 #include <stdint.h>
-#include "PAL.h" // Use the real, lightweight abstract system blueprint
+#include "PAL.h"
 
-// Forward declaration to ensure header self-containment without include loops
 struct NoteChart;
 
 namespace Engine {
@@ -31,25 +30,25 @@ enum class HoldState : uint8_t {
 // --- CACHE-ALIGNED PACKED STRUCTS ---
 
 struct alignas(4) Particle {
-    Engine::PAL::SFP16 posX;        // 2 bytes
-    Engine::PAL::SFP16 posY;        // 2 bytes
-    int16_t            velY;        // 2 bytes
-    uint8_t            lifetime;    // 1 byte
-    uint8_t            colorIndex;  // 1 byte
-};                                  // Total: 8 bytes (Perfect 32-bit boundary alignment)
+    Engine::PAL::SFP16 posX;
+    Engine::PAL::SFP16 posY;
+    int16_t          velY;
+    uint8_t          lifetime;
+    uint8_t          colorIndex;
+};
 
 struct alignas(4) Note {
-    Engine::PAL::FP16  timeline;    // 2 bytes
-    uint16_t           holdLength;  // 2 bytes
-    uint8_t            lane;        // 1 byte
-    uint8_t            flags;       // 1 byte
-    uint8_t            _padding[2]; // 2 bytes (Hardware structure alignment padding)
-};                                  // Total: 8 bytes
+    Engine::PAL::FP16  timeline;
+    uint16_t           holdLength;
+    uint8_t            lane;
+    uint8_t            flags;
+    uint8_t            _padding[2];
+};
 
 struct alignas(2) NoteState {
-    uint8_t   hitResult;    // 1 byte
-    HoldState holdPhase;    // 1 byte
-};                                  // Total: 2 bytes
+    uint8_t  hitResult;
+    HoldState holdPhase;
+};
 
 // --- CONFIGURATION CONSTANTS ---
 constexpr uint8_t  MAX_PARTICLES = 32;
@@ -72,7 +71,6 @@ constexpr uint8_t  GRID_MAX_ROWS = 6;
 constexpr Engine::PAL::SFP16 GRID_BASE_Y = 420 << 8;
 constexpr Engine::PAL::SFP16 GRID_BLOCK_SPACING = 24 << 8;
 
-// Match-3 Grid configurations mapped to 3 distinct lanes
 static const Engine::PAL::SFP16 LANE_X[3] = { 240 << 8, 320 << 8, 400 << 8 };
 static const uint32_t LANE_MASKS[3] = { 1 << 0, 1 << 1, 1 << 2 };
 
@@ -93,7 +91,7 @@ public:
     void tick();
     void render();
     void shutdown() {} 
-    bool isRunning() const;
+    bool isRunning() const { return m_isRunning; }
 
 private:
     void loadChart(const NoteChart* chart);
@@ -114,44 +112,39 @@ private:
     void renderSongSelectMenu() const;
     void renderResultsScreen() const;
 
-    // Fast inline branchless delta tracking
     static inline Engine::PAL::FP16 fp16AbsDelta(Engine::PAL::FP16 a, Engine::PAL::FP16 b) {
         int32_t d = static_cast<int32_t>(a) - static_cast<int32_t>(b);
         return static_cast<Engine::PAL::FP16>((d ^ (d >> 31)) - (d >> 31));
     }
 
-    // --- PLATFORM POINTER INTERFACES ---
     Engine::PAL::GraphicsInterface* s_graphics = nullptr;
     Engine::PAL::AudioInterface* s_audio    = nullptr;
     Engine::PAL::InputInterface* s_input    = nullptr;
 
-    // --- GAME ENGINE REGISTERS ---
     EngineState m_currentState = EngineState::TitleScreen;
-    uint8_t     m_selectedSong = 0;
-    bool        m_isRunning    = false;
-    bool        m_isStreamingMode = false;
+    uint8_t      m_selectedSong = 0;
+    bool         m_isRunning    = false;
+    bool         m_isStreamingMode = false;
     
-    uint32_t    m_score     = 0;  // Upgraded to 32-bit to prevent HUD format truncation
-    uint16_t    m_combo     = 0;
-    uint16_t    m_missCount = 0;
+    uint32_t     m_score     = 0;
+    uint16_t     m_combo     = 0;
+    uint16_t     m_missCount = 0;
 
     // --- AUDIO LOOP CLOCK HARDENING REGISTERS ---
     Engine::PAL::FP16   m_lastHardwareTrackPos = 0;
     Engine::PAL::FP16   m_localTrackAccumulator = 0;
+    Engine::PAL::FP16   m_cameraZ = 0; // CAMERA INERTIA REGISTER
     uint8_t             m_syncTickCounter = 0;
 
-    // --- FIXED CRITICAL MATCH-3 BIT-PACKED BOARD MATRIX ---
-    uint32_t    m_puzzleGrid[3] = {0, 0, 0};  // Upgraded to uint32_t to safely clear Row 6 bits
+    uint32_t    m_puzzleGrid[3] = {0, 0, 0};
     uint8_t     m_gridHeights[3] = {0, 0, 0};
 
-    // --- CACHE-FRIENDLY ZERO-ALLOCATION CONTIGUOUS MEMORY BLOCKS ---
     const NoteChart* m_activeChart = nullptr;
     uint16_t         m_readHead    = 0;
     
     NoteState        m_noteStates[MAX_NOTES_PER_CHART];
     Particle         m_particles[MAX_PARTICLES];
 
-    // Ring buffer components for real-time live streaming mode calculations
     uint16_t         m_streamHead = 0;
     uint16_t         m_streamTail = 0;
     Note             m_streamingNotes[RING_BUFFER_SIZE];
