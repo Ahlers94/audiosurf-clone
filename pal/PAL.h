@@ -12,10 +12,12 @@ namespace Engine {
 namespace PAL {
 
 // ---------------------------------------------------------------------------
-// FIXED-POINT TYPES (Q8.8 Arithmetic Structures)
+// FIXED-POINT TYPES
+// Updated to 32-bit to support larger coordinate ranges and prevent 
+// narrowing/overflow during platform-specific arithmetic.
 // ---------------------------------------------------------------------------
-using FP16  = uint16_t; // Unsigned 8.8 Fixed-Point (Range: 0.0 to 255.996)
-using SFP16 = int16_t;  // Signed 8.8 Fixed-Point   (Range: -128.0 to 127.996)
+using FP16  = uint32_t; // Unsigned 16.16 Fixed-Point (Effective range)
+using SFP16 = int32_t;  // Signed 16.16 Fixed-Point   (Effective range)
 
 #define PALETTE_SIZE 8
 
@@ -85,7 +87,7 @@ public:
     virtual FP16 getTrackProgress() = 0;
     virtual uint8_t getEnergyLevel() = 0;
     virtual void shutdown() = 0;
-    virtual bool isPaused() const = 0; // Required by GameEngine logic
+    virtual bool isPaused() const = 0;
 };
 
 // ---------------------------------------------------------------------------
