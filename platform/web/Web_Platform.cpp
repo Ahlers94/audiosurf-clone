@@ -9,6 +9,7 @@
 #include <GLES3/gl3.h> // WebGL 2.0 Core bindings
 
 #include "../../pal/PAL.h"
+#include "../../core/GameEngine.h" // Adjust this path if necessary
 
 namespace Engine {
 namespace PAL {
