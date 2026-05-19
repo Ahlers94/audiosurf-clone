@@ -119,13 +119,18 @@ void GameEngine::updateGameplaySimulation(PAL::InputState pressed) {
 #else
     // --- Emscripten/Web: derive track position from the HTML5 audio element ---
     double audioTime = EM_ASM_DOUBLE({
-        return window._audioEl ? window._audioEl.currentTime : 0;
+        var audio = window._audioEl;
+        return (audio && !audio.paused) ? audio.currentTime : 0.0;
     });
-    double audioDur = EM_ASM_DOUBLE({ return window._trackDur || 1; });
 
-    if (audioTime > 0.0 && !s_audio->isPaused()) {
-        uint32_t truePos =
-            static_cast<uint32_t>((audioTime / audioDur) * 65535.0);
+    double audioDur = EM_ASM_DOUBLE({
+        return window._trackDur || 1.0;
+    });
+
+    if (audioTime > 0.0) {
+        // Ensure we don't divide by zero if audioDur is somehow 0
+        double ratio = audioTime / (audioDur > 0 ? audioDur : 1.0);
+        uint32_t truePos = static_cast<uint32_t>(ratio * 65535.0);
         m_localTrackAccumulator = static_cast<PAL::FP16>(truePos);
     }
 #endif
